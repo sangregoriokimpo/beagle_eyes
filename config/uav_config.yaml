@@ -5,11 +5,12 @@
 network:
   # Network interface used to communicate with DJI RC 2 (leave "auto" to auto-detect Wi-Fi/LAN)
   interface: "auto"
-  # Static IPv4 address to assign to this laptop so the RC 2 RTMP URL never changes
-  static_ip: "192.168.1.100"
-  subnet_prefix: 24
-  gateway: "192.168.1.1"
-  dns: "8.8.8.8,1.1.1.1"
+  # Static IPv4 address for "Gregory’s iPhone" Personal Hotspot (172.20.10.0/28 subnet)
+  # (If using your home Wi-Fi 192.168.7.x instead, change to 192.168.7.223 / 24 / 192.168.7.1)
+  static_ip: "172.20.10.2"
+  subnet_prefix: 28
+  gateway: "172.20.10.1"
+  dns: "172.20.10.1,8.8.8.8,1.1.1.1"
   # Set to true if you want uav_vo.py to verify/apply the static IP on startup
   auto_configure_static_ip: false
 

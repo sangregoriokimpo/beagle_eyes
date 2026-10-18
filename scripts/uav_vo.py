@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -21,14 +22,29 @@ from dpvo.dpvo import DPVO
 from dpvo.lietorch import SE3
 
 
+def detect_active_ipv4(fallback_ip: str) -> str:
+    """Detects the laptop's current IPv4 address on the active network interface."""
+    try:
+        out = subprocess.check_output(["ip", "-4", "-br", "addr"], text=True, timeout=2.0)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] != "lo" and not parts[0].startswith("docker"):
+                if parts[1] == "UP":
+                    return parts[2].split("/")[0]
+    except Exception:
+        pass
+    return fallback_ip
+
+
 class MediaMTXServer:
     """
-    Manages the local MediaMTX RTMP server process.
-    If MediaMTX is already listening on the configured RTMP port, reuses it;
-    otherwise automatically launches the MediaMTX binary (or Docker container).
+    Manages the local MediaMTX RTMP server process and monitors its logs
+    to detect incoming DJI RC 2 publisher connections and stream paths.
     """
 
-    def __init__(self, mtx_cfg: dict, rtmp_port: int = 1935):
+    PUBLISH_REGEX = re.compile(r"is publishing to path '([^']+)'")
+
+    def __init__(self, mtx_cfg: dict, rtmp_port: int = 1935, on_publish_path=None):
         self.auto_start = bool(mtx_cfg.get("auto_start", True))
         self.binary = os.path.expanduser(
             mtx_cfg.get("binary", "~/beagle_eyes/vendor/mediamtx/mediamtx")
@@ -37,19 +53,42 @@ class MediaMTXServer:
             mtx_cfg.get("config_file", "~/beagle_eyes/config/mediamtx.yml")
         )
         self.port = int(rtmp_port)
+        self.on_publish_path = on_publish_path
         self._proc = None
+        self._log_thread = None
 
     def _is_port_open(self) -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(0.3)
             return s.connect_ex(("127.0.0.1", self.port)) == 0
 
+    def _kill_stale_mediamtx(self):
+        try:
+            subprocess.run(["pkill", "-f", "mediamtx"], check=False, timeout=2.0)
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+    def _monitor_logs(self):
+        if self._proc is None or self._proc.stdout is None:
+            return
+        for line in self._proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if "[RTMP]" in line or "ERR" in line or "WAR" in line:
+                print(f"[MediaMTX] {line}")
+            m = self.PUBLISH_REGEX.search(line)
+            if m and self.on_publish_path is not None:
+                published_path = m.group(1)
+                self.on_publish_path(published_path)
+
     def start(self):
         if self._is_port_open():
-            print(f"[MediaMTX] Existing RTMP server detected on port {self.port}.")
-            return
+            # Restart cleanly so we can monitor MediaMTX logs directly
+            self._kill_stale_mediamtx()
 
-        if not self.auto_start:
+        if not self.auto_start and not self._is_port_open():
             print(
                 f"[MediaMTX] Warning: Port {self.port} is not open and mediamtx.auto_start is False."
             )
@@ -82,11 +121,14 @@ class MediaMTXServer:
         print(f"[MediaMTX] Starting RTMP server on port {self.port}: {' '.join(cmd)}")
         self._proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
         )
+        self._log_thread = threading.Thread(target=self._monitor_logs, daemon=True)
+        self._log_thread.start()
 
-        # Wait up to 3 seconds for MediaMTX to bind port 1935
         for _ in range(30):
             if self._is_port_open():
                 print(f"[MediaMTX] Listening on 0.0.0.0:{self.port}")
@@ -127,8 +169,8 @@ class RTMPJpegStream:
         self.bind_ip = rtmp_cfg.get("bind_ip", "0.0.0.0")
         self.static_ip = static_ip
         self.port = int(rtmp_cfg.get("port", 1935))
-        self.app = rtmp_cfg.get("app", "live")
-        self.stream_key = rtmp_cfg.get("stream_key", "dji")
+        self.app = rtmp_cfg.get("app", "live").strip("/")
+        self.stream_key = rtmp_cfg.get("stream_key", "dji").strip("/")
         self.width = int(rtmp_cfg.get("width", 1280))
         self.height = int(rtmp_cfg.get("height", 720))
         self.fps = int(rtmp_cfg.get("fps", 30))
@@ -139,14 +181,15 @@ class RTMPJpegStream:
         self.analyzeduration = int(rtmp_cfg.get("analyzeduration", 0))
         self.reconnect_delay = float(rtmp_cfg.get("reconnect_delay_sec", 1.0))
 
+        default_path = f"{self.app}/{self.stream_key}" if self.stream_key else self.app
         url_override = rtmp_cfg.get("url_override", "").strip()
         if url_override:
             self.input_url = url_override
             self.public_url = url_override
         else:
             host = self.bind_ip if self.mode == "listen" else self.pull_host
-            self.input_url = f"rtmp://{host}:{self.port}/{self.app}/{self.stream_key}"
-            self.public_url = f"rtmp://{self.static_ip}:{self.port}/{self.app}/{self.stream_key}"
+            self.input_url = f"rtmp://{host}:{self.port}/{default_path}"
+            self.public_url = f"rtmp://{self.static_ip}:{self.port}/{default_path}"
 
         self.save_jpegs = bool(rtmp_cfg.get("save_jpegs", False))
         self.jpeg_output_dir = Path(
@@ -162,6 +205,15 @@ class RTMPJpegStream:
         self._running = False
         self._proc = None
         self._thread = None
+
+    def set_published_path(self, path: str):
+        """Updates the local pull URL if DJI RC 2 publishes to a different stream path."""
+        path = path.strip("/")
+        new_input_url = f"rtmp://{self.pull_host}:{self.port}/{path}"
+        if new_input_url != self.input_url:
+            print(f"[RTMPJpegStream] Detected DJI stream on path '{path}' -> pulling {new_input_url}")
+            self.input_url = new_input_url
+            self._terminate_proc()
 
     def _build_ffmpeg_cmd(self):
         cmd = [
@@ -219,7 +271,7 @@ class RTMPJpegStream:
                 return
 
             buf = bytearray()
-            while self._running and self._proc.poll() is None:
+            while self._running and self._proc is not None and self._proc.poll() is None:
                 chunk = self._proc.stdout.read(65536)
                 if not chunk:
                     break
@@ -266,16 +318,17 @@ class RTMPJpegStream:
             return self._frame_seq, self._latest_frame.copy(), self._latest_jpeg
 
     def _terminate_proc(self):
-        if self._proc is not None:
+        proc = self._proc
+        self._proc = None
+        if proc is not None:
             try:
-                self._proc.terminate()
-                self._proc.wait(timeout=1.0)
+                proc.terminate()
+                proc.wait(timeout=1.0)
             except Exception:
                 try:
-                    self._proc.kill()
+                    proc.kill()
                 except Exception:
                     pass
-            self._proc = None
 
     def stop(self):
         self._running = False
@@ -354,7 +407,7 @@ class TrajectoryMap:
         return self.canvas
 
 
-def render_waiting_screen(width: int, height: int, public_url: str, static_ip: str):
+def render_waiting_screen(width: int, height: int, public_url: str, active_ip: str):
     canvas = np.full((height, width, 3), 18, dtype=np.uint8)
     cv2.rectangle(canvas, (40, 40), (width - 40, height - 40), (70, 70, 70), 1)
     cv2.putText(
@@ -367,7 +420,7 @@ def render_waiting_screen(width: int, height: int, public_url: str, static_ip: s
         2,
     )
     steps = [
-        f"1. Ensure laptop & DJI RC 2 share the same network (Static IP: {static_ip})",
+        f"1. Ensure laptop & DJI RC 2 share the same Wi-Fi (Laptop IP: {active_ip})",
         "2. On DJI RC 2: Open DJI Fly -> Transmission -> Live Streaming -> RTMP",
         f"3. Enter RTMP URL: {public_url}",
         "4. Select 720p (1280x720) @ 30fps and tap Start Live Stream",
@@ -457,16 +510,22 @@ def main():
     cfg.PATCHES_PER_FRAME = int(dpvo_cfg.get("patches_per_frame", 96))
     cfg.MIXED_PRECISION = bool(dpvo_cfg.get("mixed_precision", True))
 
+    configured_ip = net_cfg.get("static_ip", "172.20.10.2")
+    active_ip = detect_active_ipv4(configured_ip)
+    stream = RTMPJpegStream(rtmp_cfg, static_ip=active_ip)
+
     # Start MediaMTX server before starting FFmpeg pull reader
-    mtx_server = MediaMTXServer(mtx_cfg, rtmp_port=int(rtmp_cfg.get("port", 1935)))
+    mtx_server = MediaMTXServer(
+        mtx_cfg,
+        rtmp_port=int(rtmp_cfg.get("port", 1935)),
+        on_publish_path=stream.set_published_path,
+    )
     mtx_server.start()
 
     print(f"Initializing DPVO ({width}x{height}) on {device.upper()}...")
     slam = DPVO(cfg, weights_path, ht=height, wd=width, viz=False)
     intrinsics = build_intrinsics(cam_cfg, width, height, device)
 
-    static_ip = net_cfg.get("static_ip", "192.168.1.100")
-    stream = RTMPJpegStream(rtmp_cfg, static_ip=static_ip)
     stream.start()
 
     feed_w = int(disp_cfg.get("feed_width", 960))
@@ -480,6 +539,7 @@ def main():
 
     print("============================================================")
     print(" MediaMTX + FFmpeg JPEG Stream Reader Active")
+    print(f" Active Laptop IP  : {active_ip}")
     print(f" DJI RC 2 Push URL : {stream.public_url}")
     print(f" Local Pull URL    : {stream.input_url}")
     print(" Press 'q' in the OpenCV window to exit.")
@@ -496,7 +556,7 @@ def main():
             while True:
                 seq, frame, jpeg_bytes = stream.read_latest(last_seq)
                 if frame is None:
-                    wait_view = render_waiting_screen(feed_w, feed_h, stream.public_url, static_ip)
+                    wait_view = render_waiting_screen(feed_w, feed_h, stream.public_url, active_ip)
                     dashboard = np.hstack((wait_view, traj_img))
                     cv2.imshow(window_title, dashboard)
                     if cv2.waitKey(30) & 0xFF == ord("q"):
