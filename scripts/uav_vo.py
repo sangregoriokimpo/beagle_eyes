@@ -24,6 +24,7 @@ from broadcast import TelemetryBroadcaster
 from dpvo.config import cfg
 from dpvo.dpvo import DPVO
 from dpvo.lietorch import SE3
+from gps_tf import PLACEHOLDER_ORIGIN, GpsTfConfig, GpsTransform
 from survey import PersonDetector3D
 
 
@@ -935,6 +936,26 @@ def main():
         help="Confidence threshold for person segmentation (default: 0.45)",
     )
     parser.add_argument(
+        "--gps-tf",
+        action="store_true",
+        help="Convert VO poses/detections to local ENU + lat/lon (published as 'geo' in telemetry); see gps_tf/README.md",
+    )
+    parser.add_argument(
+        "--gps-origin",
+        default=None,
+        metavar="LAT,LON[,ALT]",
+        help="Known start coordinate shared by drone and glasses (default: placeholder until glasses GPS exists)",
+    )
+    parser.add_argument("--gps-heading", type=float, default=None, help="True bearing (deg, clockwise from north) the first camera faces")
+    parser.add_argument("--gps-cam-pitch", type=float, default=None, help="First-camera pitch below horizontal in degrees (0 level, 90 nadir)")
+    parser.add_argument("--gps-scale", type=float, default=None, help="Metres per VO unit, if known (default: unknown, flagged 'assumed')")
+    parser.add_argument("--gps-start-height", type=float, default=None, help="Drone height above ground at start, metres")
+    parser.add_argument(
+        "--gps-autocal",
+        action="store_true",
+        help="Estimate scale + gravity from the ground plane in the point cloud (needs --gps-start-height)",
+    )
+    parser.add_argument(
         "--dpviewer",
         action="store_true",
         help="Also launch DPVO's native Pangolin OpenGL 3D Viewer (requires modules/DPViewer installed)",
@@ -961,6 +982,7 @@ def main():
     dpvo_cfg = uav_cfg.get("dpvo", {})
     disp_cfg = uav_cfg.get("display", {})
     person_cfg = uav_cfg.get("person_detection", {})
+    gps_cfg = uav_cfg.get("gps_tf", {})
 
     if args.setup_static_ip or net_cfg.get("auto_configure_static_ip", False):
         setup_script = str(BEAGLE_ROOT / "scripts" / "setup_uav_rtmp.sh")
@@ -986,6 +1008,41 @@ def main():
     use_dpviewer = bool(args.dpviewer or dpvo_cfg.get("use_dpviewer", False))
     detect_people = bool(args.detect_people or person_cfg.get("enabled", False))
     detect_conf = float(args.detect_conf if args.detect_conf is not None else person_cfg.get("confidence", 0.45))
+
+    gps_tf = None
+    if args.gps_tf or gps_cfg.get("enabled", False):
+        origin_str = args.gps_origin or gps_cfg.get("origin")
+        if origin_str:
+            origin = [float(v) for v in str(origin_str).replace(" ", "").split(",")]
+            if len(origin) not in (2, 3):
+                print("Error: --gps-origin must be LAT,LON[,ALT]")
+                sys.exit(1)
+            origin_lat, origin_lon, origin_alt = origin[0], origin[1], (origin[2] if len(origin) == 3 else 0.0)
+            origin_source = "fixed"
+        else:
+            origin_lat, origin_lon, origin_alt = PLACEHOLDER_ORIGIN
+            origin_source = "placeholder"
+
+        def _pick(cli, key, default):
+            return cli if cli is not None else gps_cfg.get(key, default)
+
+        gps_scale = _pick(args.gps_scale, "scale", None)
+        gps_tf = GpsTransform(
+            GpsTfConfig(
+                origin_lat=origin_lat,
+                origin_lon=origin_lon,
+                origin_alt=origin_alt,
+                origin_source=origin_source,
+                heading_deg=float(_pick(args.gps_heading, "heading_deg", 0.0)),
+                cam_pitch_deg=float(_pick(args.gps_cam_pitch, "cam_pitch_deg", 0.0)),
+                scale=None if gps_scale is None else float(gps_scale),
+                start_height_m=float(_pick(args.gps_start_height, "start_height_m", 0.0)),
+                autocal=bool(args.gps_autocal or gps_cfg.get("autocal", False)),
+            )
+        )
+        if gps_tf.cfg.autocal and gps_tf.cfg.start_height_m <= 0:
+            print("Warning: --gps-autocal needs --gps-start-height > 0; autocal disabled.")
+            gps_tf.cfg.autocal = False
 
     # Ensure DPVO dimensions are multiples of 16 for the feature pyramid
     vo_width = max(16, int(round(base_width * vo_scale)))
@@ -1069,10 +1126,19 @@ def main():
         f" Trajectory Plot   : {plot_mode.upper()} + PointCloud={'ON' if show_pcl else 'OFF'} "
         "(L-Drag: Rotate | R-Drag: Pan | Scroll: Zoom | 'p': Pts | 'b': Boxes | 'v': 2D/3D)"
     )
+    if gps_tf is not None:
+        c = gps_tf.cfg
+        print(
+            f" GPS Transform     : ENABLED origin=({c.origin_lat:.6f}, {c.origin_lon:.6f}) [{c.origin_source}] "
+            f"heading={c.heading_deg:.0f}° pitch={c.cam_pitch_deg:.0f}° "
+            f"scale={'auto(ground plane)' if c.autocal else (c.scale if c.scale is not None else 'ASSUMED 1.0')}"
+        )
     print(" Press SPACE to hide/show instructions, or 'q' to exit.")
     print("============================================================")
 
     broadcaster = TelemetryBroadcaster(port=8765).start()
+    gps_last_pos = None
+    gps_path_len_v = 0.0
 
     frames_total = 0
     last_seq = 0
@@ -1174,6 +1240,14 @@ def main():
                     clean_dets = [
                         {k: v for k, v in d.items() if not k.startswith("_")} for d in latest_detections_3d
                     ]
+                    extra_telemetry = {"detections_3d": clean_dets}
+                    if gps_tf is not None and slam.is_initialized and slam.n > 0:
+                        if gps_last_pos is not None:
+                            gps_path_len_v += float(np.linalg.norm(np.asarray(pose_7d[:3]) - gps_last_pos))
+                        gps_last_pos = np.asarray(pose_7d[:3], dtype=np.float64)
+                        extra_telemetry["geo"] = gps_tf.annotate(
+                            pose_7d, latest_detections_3d, pcl_xyz=pcl_xyz, path_len_v=gps_path_len_v
+                        )
                     broadcaster.publish_telemetry(
                         pose=pose_7d,
                         frame_id=seq,
@@ -1184,7 +1258,7 @@ def main():
                         all_poses_xyz=all_poses,
                         pcl_xyz=pcl_xyz,
                         pcl_bgr=pcl_bgr,
-                        extra={"detections_3d": clean_dets},
+                        extra=extra_telemetry,
                     )
 
                 elapsed = time.time() - t_start

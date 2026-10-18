@@ -95,3 +95,18 @@ person_detection:
   # Keep spotted people anchored on the 3D map for N seconds after leaving camera view
   memory_sec: 15.0
 
+gps_tf:
+  # Convert VO poses/detections to local ENU + lat/lon (--gps-tf). Output is the "geo" block in telemetry.
+  enabled: false
+  # Known start coordinate shared by drone and glasses, "LAT,LON[,ALT]". Leave empty to use a placeholder.
+  origin: ""
+  # True bearing (deg clockwise from north) the first camera faces
+  heading_deg: 0.0
+  # First-camera pitch below horizontal (0 level, 90 straight down)
+  cam_pitch_deg: 0.0
+  # Metres per VO unit if known; null = unknown (flagged "assumed")
+  scale: null
+  # Drone height above ground at start (metres)
+  start_height_m: 0.0
+  # Estimate scale + gravity from the ground plane (needs start_height_m > 0)
+  autocal: false
