@@ -56,7 +56,6 @@ class _WSClient:
     def __init__(self, sock: socket.socket, addr: Tuple[str, int]):
         self.sock = sock
         self.addr = addr
-        # Small bounded queue with drop-oldest semantics so slow clients never lag SLAM
         self.queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=4)
         self.alive = True
 
@@ -96,7 +95,6 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Suppress per-frame HTTP access logs to keep terminal output clean
         return
 
     def _send_cors_headers(self) -> None:
@@ -113,13 +111,11 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         b: TelemetryBroadcaster = self.server.broadcaster  # type: ignore[attr-defined]
 
-        # Enable TCP_NODELAY so small telemetry & MJPEG chunks flush immediately without Nagle delay
         try:
             self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception:
             pass
 
-        # 1. Check for WebSocket Upgrade request (supports ws://<ip>:<port>/ws, /telemetry, or /)
         upgrade = (self.headers.get("Upgrade") or "").lower()
         if upgrade == "websocket":
             self._handle_websocket(b)
@@ -127,12 +123,10 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
 
         path = self.path.split("?", 1)[0]
 
-        # 2. Live MJPEG video stream
         if path in ("/video.mjpg", "/video_feed", "/stream.mjpg"):
             self._handle_mjpeg(b)
             return
 
-        # 3. Single JPEG snapshot
         if path == "/snapshot.jpg":
             jpeg = b.get_latest_jpeg()
             if jpeg is None:
@@ -150,7 +144,6 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(jpeg)
             return
 
-        # 4. JSON health/status endpoint
         if path in ("/status", "/health"):
             body = json.dumps(b.get_status()).encode("utf-8")
             self.send_response(200)
@@ -161,7 +154,6 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # 5. Built-in browser diagnostic preview page at /
         html = b.render_preview_html().encode("utf-8")
         self.send_response(200)
         self._send_cors_headers()
@@ -218,7 +210,6 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
         client = _WSClient(self.connection, self.client_address)
         b._register_ws_client(client)
 
-        # Monitor incoming ping/close frames in a small reader thread
         def _reader() -> None:
             try:
                 while client.alive and b.is_running:
@@ -236,9 +227,9 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
                         length = struct.unpack("!Q", ext)[0]
                     mask_key = self.connection.recv(4) if masked else b""
                     payload = self.connection.recv(length) if length > 0 else b""
-                    if opcode == 0x8:  # Close frame
+                    if opcode == 0x8:
                         break
-                    if opcode == 0x9:  # Ping -> send Pong
+                    if opcode == 0x9:
                         if masked and mask_key:
                             payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
                         client.enqueue(_encode_ws_frame(payload, opcode=0xA))
@@ -251,7 +242,6 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
         reader_thread.start()
 
         try:
-            # Immediately push latest telemetry snapshot if available so new clients don't wait
             latest_msg = b.get_latest_telemetry_bytes()
             if latest_msg is not None:
                 self.connection.sendall(_encode_ws_frame(latest_msg, opcode=0x1))
@@ -359,10 +349,6 @@ class TelemetryBroadcaster:
             self._server = None
 
     def publish_frame(self, frame_bgr: Optional[np.ndarray] = None, jpeg_bytes: Optional[bytes] = None) -> None:
-        """
-        Publishes a video frame to all connected MJPEG clients.
-        Pass `jpeg_bytes` directly if already encoded (e.g. inside uav_vo.py) to avoid re-encoding.
-        """
         if not self.is_running:
             return
         if jpeg_bytes is None:
@@ -391,12 +377,6 @@ class TelemetryBroadcaster:
         pcl_bgr: Optional[np.ndarray] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """
-        Publishes a low-latency JSON telemetry packet over WebSocket.
-        - `pose` can be `[x, y, z]` or 7D `[x, y, z, qx, qy, qz, qw]`.
-        - `pcl_xyz` / `pcl_bgr` are automatically filtered, converted BGR->RGB, downsampled,
-          and throttled to `pcl_interval_sec` so pose updates stay fast.
-        """
         if not self.is_running:
             return
 
@@ -441,7 +421,6 @@ class TelemetryBroadcaster:
         if infer_ms is not None:
             packet["infer_ms"] = round(float(infer_ms), 1)
 
-        # Attach throttled 3D point cloud if provided
         if pcl_xyz is not None and (now - self._last_pcl_sent_time) >= self.pcl_interval_sec:
             pcl_payload = self._format_point_cloud(pcl_xyz, pcl_bgr, center_xyz=pose_arr[:3])
             if pcl_payload is not None:
@@ -479,10 +458,8 @@ class TelemetryBroadcaster:
             bgr = np.asarray(pcl_bgr, dtype=np.uint8).reshape(-1, 3)
             if len(bgr) == len(valid):
                 bgr = bgr[valid]
-                # Convert OpenCV BGR -> Web RGB
                 rgb = bgr[:, ::-1]
 
-        # Reject extreme outlier points (> 96th percentile distance from camera)
         dists = np.linalg.norm(xyz - center_xyz.reshape(1, 3), axis=1)
         if len(dists) > 16:
             clip_r = max(float(np.percentile(dists, 96)) * 1.5, 2.0)
@@ -501,7 +478,6 @@ class TelemetryBroadcaster:
             if rgb is not None:
                 rgb = rgb[idx]
 
-        # Flat arrays [x0,y0,z0, x1,y1,z1, ...] & [r0,g0,b0, ...] for zero-copy Float32Array in Three.js
         positions_flat = np.round(xyz.astype(np.float64), 3).ravel().tolist()
         if rgb is not None:
             colors_flat = rgb.ravel().tolist()

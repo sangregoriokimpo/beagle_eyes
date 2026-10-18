@@ -8,9 +8,12 @@ import sys
 from pathlib import Path
 
 BEAGLE_ROOT = Path(__file__).resolve().parent.parent
+if str(BEAGLE_ROOT) not in sys.path:
+    sys.path.insert(0, str(BEAGLE_ROOT))
 REPO_DIR = str(BEAGLE_ROOT / "vendor" / "Deep-Visual-Odometry-SLAM")
-sys.path.append(os.path.join(REPO_DIR, "methods/dpvo"))
+sys.path.insert(0, os.path.join(REPO_DIR, "methods/dpvo"))
 
+from broadcast import TelemetryBroadcaster
 from dpvo.dpvo import DPVO
 from dpvo.config import cfg
 from dpvo.lietorch import SE3
@@ -96,6 +99,7 @@ def main():
     intrinsics = torch.tensor([fx, fy, cx, cy], dtype=torch.float32, device=DEVICE)
 
     traj_plotter = TrajectoryMap(width=540, height=720)
+    broadcaster = TelemetryBroadcaster(port=8765).start()
     print("Ready. Move laptop to track VO. Press 'q' to exit.")
 
     t_idx = 0
@@ -127,13 +131,28 @@ def main():
                     t_start = time.time()
 
                 x, y, z = 0.0, 0.0, 0.0
+                pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                pcl_xyz, pcl_bgr = None, None
                 if slam.is_initialized and slam.n > 0:
                     # Convert latest keyframe pose from world-to-camera (T_cw) to camera-to-world (T_wc)
                     pose = SE3(slam.pg.poses_[slam.n - 1]).inv().data.cpu().numpy()
                     x, y, z = pose[:3]
+                    pcl_xyz = slam.pg.points_[: slam.m].cpu().numpy()
+                    pcl_bgr = slam.pg.colors_.view(-1, 3)[: slam.m].cpu().numpy()
                     traj_img = traj_plotter.update(x, z)
                 else:
                     traj_img = traj_plotter.update(0.0, 0.0)
+
+                broadcaster.publish_frame(frame_bgr=frame)
+                broadcaster.publish_telemetry(
+                    pose=pose,
+                    frame_id=t_idx,
+                    fps=fps,
+                    infer_ms=infer_ms,
+                    initialized=bool(slam.is_initialized),
+                    pcl_xyz=pcl_xyz,
+                    pcl_bgr=pcl_bgr,
+                )
 
                 feed_display = frame.copy()
                 cv2.rectangle(feed_display, (15, 15), (580, 110), (15, 15, 15), -1)
@@ -161,6 +180,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        broadcaster.stop()
         cap.release()
         cv2.destroyAllWindows()
 

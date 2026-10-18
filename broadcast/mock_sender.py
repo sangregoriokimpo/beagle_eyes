@@ -33,7 +33,6 @@ def generate_demo_point_cloud(num_points: int = 1800) -> tuple[np.ndarray, np.nd
 
     xyz = np.stack([x, y, z], axis=1).astype(np.float32)
 
-    # Height-mapped BGR colors
     norm_y = np.clip((y + 1.0) / 2.0, 0.0, 1.0)
     b = (255 * (1.0 - norm_y)).astype(np.uint8)
     g = (180 * norm_y + 60).astype(np.uint8)
@@ -46,14 +45,12 @@ def render_synthetic_frame(width: int, height: int, t: float, x: float, y: float
     """Renders a clean synthetic HUD camera frame when no webcam is used."""
     img = np.full((height, width, 3), (20, 24, 32), dtype=np.uint8)
 
-    # Animated horizon / grid lines
     horizon_y = int(height * 0.5 + math.sin(t * 0.9) * 45)
     cv2.line(img, (0, horizon_y), (width, horizon_y), (70, 90, 110), 2)
     for offset in range(-400, 401, 80):
         px = int(width // 2 + offset + math.cos(t * 0.7) * 60)
         cv2.line(img, (width // 2, horizon_y), (px, height), (45, 55, 70), 1)
 
-    # HUD overlay
     cv2.rectangle(img, (20, 20), (620, 120), (12, 15, 20), -1)
     cv2.rectangle(img, (20, 20), (620, 120), (0, 220, 255), 1)
     cv2.putText(
@@ -108,12 +105,10 @@ def main() -> None:
             loop_start = time.perf_counter()
             t = time.time() - t0
 
-            # Smooth 3D figure-8 trajectory
             x = 2.5 * math.sin(t * 0.6)
             z = 2.5 * math.sin(t * 0.6) * math.cos(t * 0.6)
             y = -0.8 + 0.3 * math.sin(t * 0.3)
 
-            # Yaw quaternion around Y axis
             yaw = math.atan2(math.cos(t * 0.6), math.cos(2 * t * 0.6))
             qy = math.sin(yaw * 0.5)
             qw = math.cos(yaw * 0.5)

@@ -15,9 +15,12 @@ import torch
 import yaml
 
 BEAGLE_ROOT = Path(__file__).resolve().parent.parent
+if str(BEAGLE_ROOT) not in sys.path:
+    sys.path.insert(0, str(BEAGLE_ROOT))
 REPO_DIR = str(BEAGLE_ROOT / "vendor" / "Deep-Visual-Odometry-SLAM")
-sys.path.append(os.path.join(REPO_DIR, "methods/dpvo"))
+sys.path.insert(0, os.path.join(REPO_DIR, "methods/dpvo"))
 
+from broadcast import TelemetryBroadcaster
 from dpvo.config import cfg
 from dpvo.dpvo import DPVO
 from dpvo.lietorch import SE3
@@ -944,6 +947,8 @@ def main():
     print(" Press SPACE to hide/show instructions, or 'q' to exit.")
     print("============================================================")
 
+    broadcaster = TelemetryBroadcaster(port=8765).start()
+
     frames_total = 0
     last_seq = 0
     t_start = time.time()
@@ -990,6 +995,9 @@ def main():
                 frames_total += 1
                 vid_frames_window += 1
 
+                # Publish every incoming video frame immediately (reuses jpeg_bytes with zero re-encoding)
+                broadcaster.publish_frame(frame_bgr=frame, jpeg_bytes=jpeg_bytes)
+
                 # Run DPVO odometry every `frame_stride` frames
                 if (frames_total - 1) % frame_stride == 0:
                     if frame.shape[0] != vo_height or frame.shape[1] != vo_width:
@@ -1006,9 +1014,14 @@ def main():
                     infer_ms = (time.perf_counter() - t0) * 1000.0
                     vo_frames_window += 1
 
+                    pose_7d = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                    all_poses = None
+                    pcl_xyz, pcl_bgr = None, None
                     if slam.is_initialized and slam.n > 0:
                         # Extract all BA-refined keyframe poses in world coordinates (T_wc)
-                        all_poses = SE3(slam.pg.poses_[: slam.n]).inv().data.cpu().numpy()[:, :3]
+                        all_poses_7d = SE3(slam.pg.poses_[: slam.n]).inv().data.cpu().numpy()
+                        pose_7d = all_poses_7d[-1]
+                        all_poses = all_poses_7d[:, :3]
                         x, y, z = all_poses[-1]
                         # Extract DPVO's live 3D sparse point cloud and RGB/BGR patch colors
                         pcl_xyz = slam.pg.points_[: slam.m].cpu().numpy()
@@ -1018,6 +1031,18 @@ def main():
                         )
                     else:
                         traj_img = traj_plotter.update(0.0, 0.0, 0.0)
+
+                    broadcaster.publish_telemetry(
+                        pose=pose_7d,
+                        frame_id=seq,
+                        fps=vid_fps,
+                        vo_hz=vo_hz,
+                        infer_ms=infer_ms,
+                        initialized=bool(slam.is_initialized),
+                        all_poses_xyz=all_poses,
+                        pcl_xyz=pcl_xyz,
+                        pcl_bgr=pcl_bgr,
+                    )
 
                 elapsed = time.time() - t_start
                 if elapsed >= 1.0:
@@ -1087,6 +1112,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        broadcaster.stop()
         stream.stop()
         mtx_server.stop()
         cv2.destroyAllWindows()

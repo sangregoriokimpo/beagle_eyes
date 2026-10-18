@@ -22,18 +22,9 @@ export interface BeagleTelemetry {
   trajectory: [number, number, number][];
 }
 
-/**
- * React hook for consuming Beagle Eyes HTTP MJPEG video + WebSocket telemetry.
- *
- * Example usage in React:
- *   const { connected, videoUrl, telemetry, pointCloudRef } = useBeagleStream("192.168.1.50:8765");
- *   return <img src={videoUrl} alt="Live Feed" />;
- */
 export function useBeagleStream(hostAndPort = "127.0.0.1:8765") {
   const [connected, setConnected] = useState(false);
   const [telemetry, setTelemetry] = useState<BeagleTelemetry | null>(null);
-
-  // Stored in a ref so 2000-point cloud arrays don't trigger full React tree re-renders
   const pointCloudRef = useRef<BeaglePointCloud | null>(null);
 
   const cleanHost = hostAndPort.replace(/^(https?|wss?):\/\//, "").replace(/\/.*$/, "");
