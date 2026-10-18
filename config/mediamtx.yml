@@ -1,0 +1,27 @@
+# ============================================================================
+# MediaMTX Configuration for Beagle Eyes - DJI Mini 5 Pro (RC 2) RTMP Stream
+# ============================================================================
+logLevel: info
+logDestinations: [stdout]
+
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+udpMaxPayloadSize: 1472
+
+# Enable RTMP Server for DJI RC 2 push and local FFmpeg pull
+rtmp: yes
+rtmpAddress: :1935
+rtmpEncryption: "no"
+
+# Disable unused protocols to minimize overhead and port conflicts
+rtsp: no
+hls: no
+webrtc: no
+srt: no
+
+paths:
+  all_others:
+    source: publisher
+    overridePublisher: yes
+

@@ -1,0 +1,70 @@
+# ============================================================================
+# Beagle Eyes - DJI Mini 5 Pro (RC 2) RTMP -> MediaMTX -> JPEG Visual Odometry
+# ============================================================================
+
+network:
+  # Network interface used to communicate with DJI RC 2 (leave "auto" to auto-detect Wi-Fi/LAN)
+  interface: "auto"
+  # Static IPv4 address to assign to this laptop so the RC 2 RTMP URL never changes
+  static_ip: "192.168.1.100"
+  subnet_prefix: 24
+  gateway: "192.168.1.1"
+  dns: "8.8.8.8,1.1.1.1"
+  # Set to true if you want uav_vo.py to verify/apply the static IP on startup
+  auto_configure_static_ip: false
+
+mediamtx:
+  # Automatically start MediaMTX inside uav_vo.py if port 1935 is not already listening
+  auto_start: true
+  binary: "~/beagle_eyes/vendor/mediamtx/mediamtx"
+  config_file: "~/beagle_eyes/config/mediamtx.yml"
+  version: "v1.11.3"
+
+rtmp:
+  # "pull": DJI RC 2 pushes to MediaMTX (rtmp://<static_ip>:1935/live/dji),
+  #         and uav_vo.py pulls from MediaMTX (rtmp://127.0.0.1:1935/live/dji)
+  mode: "pull"
+  pull_host: "127.0.0.1"
+  bind_ip: "0.0.0.0"
+  port: 1935
+  app: "live"
+  stream_key: "dji"
+  url_override: ""
+
+  # JPEG extraction settings (FFmpeg image2pipe -> MJPEG stream -> OpenCV imdecode)
+  width: 1280
+  height: 720
+  fps: 30
+  jpeg_quality: 2          # 2 = highest JPEG quality (range 2-31, lower is better)
+  fflags: "nobuffer"
+  flags: "low_delay"
+  probesize: 32768
+  analyzeduration: 0
+  reconnect_delay_sec: 1.0
+
+  # Optional: save decoded JPEG frames to disk for dataset logging / debugging
+  save_jpegs: false
+  jpeg_output_dir: "~/beagle_eyes/logs/uav_jpegs"
+
+camera:
+  model: "DJI Mini 5 Pro (24mm equiv, 16:9 1280x720)"
+  width: 1280
+  height: 720
+  # DJI Mini 5 Pro 24mm equivalent in 16:9 mode -> ~73.7 deg Horizontal FOV
+  hfov_deg: 73.74
+  # Optional explicit intrinsics [fx, fy, cx, cy]; if null, computed from hfov_deg
+  intrinsics: null
+
+dpvo:
+  weights: "~/beagle_eyes/checkpoints/dpvo.pth"
+  config: "~/beagle_eyes/vendor/Deep-Visual-Odometry-SLAM/methods/dpvo/config/default.yaml"
+  buffer_size: 2048
+  patches_per_frame: 96
+  mixed_precision: true
+
+display:
+  window_title: "Beagle Eyes - DJI Mini 5 Pro RTMP Visual Odometry"
+  feed_width: 960
+  feed_height: 720
+  map_width: 540
+  map_height: 720
