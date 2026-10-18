@@ -69,10 +69,14 @@ dpvo:
   optimization_window: 10
   loop_closure: false
   mixed_precision: true
+  # Set true to open the native Pangolin OpenGL DPViewer window (requires modules/DPViewer compiled)
+  use_dpviewer: false
 
 display:
-  # Trajectory visualization mode: "2d" (top-down X-Z) or "3d" (3D perspective X-Y-Z + altitude)
+  # Trajectory visualization mode: "2d" (top-down X-Z) or "3d" (3D point cloud + X-Y-Z trajectory)
   plot_mode: "3d"
+  show_pointcloud: true
+  max_pointcloud_points: 4000
   view_yaw_deg: -35.0
   view_pitch_deg: 28.0
   window_title: "Beagle Eyes - DJI Mini 5 Pro RTMP Visual Odometry"

@@ -337,15 +337,18 @@ class RTMPJpegStream:
 
 class TrajectoryMap:
     """
-    Renders real-time UAV trajectory in either:
+    Renders real-time UAV trajectory and DPVO 3D Sparse Point Cloud in either:
       - "2d": Top-down bird's-eye view (X = horizontal, Z = forward/depth)
-      - "3d": 3D perspective/isometric view (X, Z, and Altitude = -Y) with ground grid,
+      - "3d": 3D perspective view (X, Z, and Altitude = -Y) with DPVO's live colored
+              3D point cloud (slam.pg.points_ & slam.pg.colors_), ground grid,
               3D axes, ground shadow projection, and altitude drop-pillars.
     Supports interactive mouse controls:
       - Left-click + drag  : Rotate 3D view (yaw / pitch)
       - Right-click + drag : Pan / drag map (2D & 3D)
       - Scroll wheel       : Zoom in / out
       - Double-click / 'r' : Reset view
+      - 'v' key            : Toggle 2D / 3D
+      - 'p' key            : Toggle 3D point cloud display
     """
 
     def __init__(
@@ -356,11 +359,15 @@ class TrajectoryMap:
         yaw_deg=-35.0,
         pitch_deg=28.0,
         x_offset_on_window=960,
+        show_pointcloud=True,
+        max_points=4000,
     ):
         self.w = width
         self.h = height
         self.x_offset_on_window = x_offset_on_window
         self.mode = mode.lower() if mode.lower() in ("2d", "3d") else "3d"
+        self.show_pointcloud = bool(show_pointcloud)
+        self.max_points = int(max_points)
         self.default_yaw = float(yaw_deg)
         self.default_pitch = float(pitch_deg)
         self.yaw_deg = float(yaw_deg)
@@ -378,9 +385,16 @@ class TrajectoryMap:
 
         self.canvas = np.zeros((self.h, self.w, 3), dtype=np.uint8)
         self.history = []  # list of (x, y, z)
+        self.pcl_xyz = None   # (N, 3) numpy array in camera coords (x, y, z)
+        self.pcl_bgr = None   # (N, 3) uint8 numpy array in BGR order
 
     def toggle_mode(self):
         self.mode = "2d" if self.mode == "3d" else "3d"
+        self.dirty = False
+        return self.render()
+
+    def toggle_pointcloud(self):
+        self.show_pointcloud = not self.show_pointcloud
         self.dirty = False
         return self.render()
 
@@ -436,10 +450,22 @@ class TrajectoryMap:
                 self.zoom = float(np.clip(self.zoom / 1.12, 0.25, 8.0))
             self.dirty = True
 
-    def update(self, x, y=0.0, z=0.0):
-        self.history.append((float(x), float(y), float(z)))
-        if len(self.history) > 1500:
-            self.history.pop(0)
+    def update(self, x, y=0.0, z=0.0, all_poses_xyz=None, pcl_xyz=None, pcl_bgr=None):
+        if all_poses_xyz is not None and len(all_poses_xyz) > 0:
+            self.history = [(float(p[0]), float(p[1]), float(p[2])) for p in all_poses_xyz[-1500:]]
+        else:
+            self.history.append((float(x), float(y), float(z)))
+            if len(self.history) > 1500:
+                self.history.pop(0)
+
+        if pcl_xyz is not None and pcl_bgr is not None and len(pcl_xyz) > 0:
+            if len(pcl_xyz) > self.max_points:
+                idx = np.linspace(0, len(pcl_xyz) - 1, self.max_points, dtype=np.int64)
+                pcl_xyz = pcl_xyz[idx]
+                pcl_bgr = pcl_bgr[idx]
+            self.pcl_xyz = pcl_xyz
+            self.pcl_bgr = pcl_bgr
+
         self.dirty = False
         return self.render()
 
@@ -557,7 +583,38 @@ class TrajectoryMap:
             cv2.line(self.canvas, tuple(px[0]), tuple(px[1]), color, 1, cv2.LINE_AA)
             cv2.line(self.canvas, tuple(pz[0]), tuple(pz[1]), color, 1, cv2.LINE_AA)
 
-        # 2. Draw 3D coordinate axes at origin (X = Red, Z = Cyan/Blue, Alt = Green)
+        # 2. Render DPVO 3D Sparse RGB Point Cloud (slam.pg.points_ & slam.pg.colors_)
+        num_pcl_drawn = 0
+        if self.show_pointcloud and self.pcl_xyz is not None and self.pcl_bgr is not None:
+            # Convert (x, y_down, z_forward) -> (x, z_forward, alt_up = -y)
+            pcl_world = np.stack(
+                [self.pcl_xyz[:, 0], self.pcl_xyz[:, 2], -self.pcl_xyz[:, 1]], axis=-1
+            )
+            # Filter out invalid/infinite depths and points far outside the scene radius
+            clip_bound = max(base_dist * 3.5, 5.0)
+            valid = np.isfinite(pcl_world).all(axis=1) & (np.abs(pcl_world) < clip_bound).all(axis=1)
+            if np.any(valid):
+                valid_pts = pcl_world[valid]
+                valid_clr = self.pcl_bgr[valid]
+                uv = self._project_3d(valid_pts, scale, cx, cy)
+                in_bounds = (
+                    (uv[:, 0] >= 1)
+                    & (uv[:, 0] < self.w - 2)
+                    & (uv[:, 1] >= 95)
+                    & (uv[:, 1] < self.h - 30)
+                )
+                uv = uv[in_bounds]
+                valid_clr = valid_clr[in_bounds]
+                num_pcl_drawn = len(uv)
+                if num_pcl_drawn > 0:
+                    # Draw 2x2 splats for each 3D point with its RGB/BGR patch color
+                    u0, v0 = uv[:, 0], uv[:, 1]
+                    self.canvas[v0, u0] = valid_clr
+                    self.canvas[v0 + 1, u0] = valid_clr
+                    self.canvas[v0, u0 + 1] = valid_clr
+                    self.canvas[v0 + 1, u0 + 1] = valid_clr
+
+        # 3. Draw 3D coordinate axes at origin (X = Red, Z = Cyan/Blue, Alt = Green)
         axis_len = base_dist * 0.45
         axes_pts = np.array(
             [
@@ -577,7 +634,7 @@ class TrajectoryMap:
         cv2.putText(self.canvas, "+Z", tuple(ap[2] + [5, -5]), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 190, 60), 1)
         cv2.putText(self.canvas, "+Alt", tuple(ap[3] + [5, -5]), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (80, 240, 100), 1)
 
-        # 3. Project ground shadow (Alt=0) and 3D flight trajectory
+        # 4. Project ground shadow (Alt=0) and 3D flight trajectory
         shadow_3d = pts_3d.copy()
         shadow_3d[:, 2] = 0.0
         shadow_px = self._project_3d(shadow_3d, scale, cx, cy)
@@ -605,19 +662,19 @@ class TrajectoryMap:
         cur_x, cur_z, cur_alt = pts_3d[-1]
         cv2.putText(
             self.canvas,
-            "3D ODOMETRY TRAJECTORY (X-Z-ALT)",
+            "3D ODOM + POINT CLOUD (X-Z-ALT)",
             (20, 35),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.60,
+            0.58,
             (255, 255, 255),
             2,
         )
         cv2.putText(
             self.canvas,
-            f"Scale: +/-{max_dist:.1f}m (Grid: {step_m:.1f}m) | Alt: {cur_alt:+.2f}m",
+            f"Scale: +/-{max_dist:.1f}m | Alt: {cur_alt:+.2f}m | 3D Pts: {num_pcl_drawn}",
             (20, 62),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.46,
+            0.45,
             (170, 210, 230),
             1,
         )
@@ -632,7 +689,7 @@ class TrajectoryMap:
         )
         cv2.putText(
             self.canvas,
-            "L-Drag: Rotate | R-Drag: Pan | Scroll: Zoom | [v] 2D/3D",
+            "L-Drag: Rotate | R-Drag: Pan | [p] Pts | [v] 2D/3D",
             (20, self.h - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.42,
@@ -660,7 +717,7 @@ def render_waiting_screen(width: int, height: int, public_url: str, active_ip: s
         "2. On DJI RC 2: Open DJI Fly -> Transmission -> Live Streaming -> RTMP",
         f"3. Enter RTMP URL: {public_url}",
         "4. Select 720p (1280x720) @ 30fps and tap Start Live Stream",
-        "Map: Left-Drag = Rotate | Right-Drag = Pan | 'v' = 2D/3D | 'q' = Exit",
+        "Map: Left-Drag = Rotate | Right-Drag = Pan | 'p' = PointCloud | 'v' = 2D/3D",
     ]
     for idx, line in enumerate(steps):
         cv2.putText(
@@ -700,11 +757,13 @@ def build_intrinsics(
 
 
 def handle_key(key: int, traj_plotter: TrajectoryMap):
-    """Handles keyboard shortcuts for quitting, toggling 2D/3D, and resetting view."""
+    """Handles keyboard shortcuts for quitting, toggling 2D/3D, point cloud, and resetting view."""
     if key == ord("q"):
         return True, None
     if key == ord("v"):
         return False, traj_plotter.toggle_mode()
+    if key == ord("p"):
+        return False, traj_plotter.toggle_pointcloud()
     if key == ord("r"):
         return False, traj_plotter.reset_view()
     return False, None
@@ -725,7 +784,7 @@ def main():
         type=str,
         choices=["2d", "3d"],
         default=None,
-        help="Trajectory visualization mode: '2d' (top-down X-Z) or '3d' (3D perspective X-Y-Z)",
+        help="Trajectory visualization mode: '2d' (top-down X-Z) or '3d' (3D point cloud + X-Y-Z)",
     )
     parser.add_argument(
         "--stride",
@@ -738,6 +797,11 @@ def main():
         type=float,
         default=None,
         help="Override dpvo.vo_scale (e.g., 0.5 to run DPVO at half resolution while displaying full 720p)",
+    )
+    parser.add_argument(
+        "--dpviewer",
+        action="store_true",
+        help="Also launch DPVO's native Pangolin OpenGL 3D Viewer (requires modules/DPViewer installed)",
     )
     parser.add_argument(
         "--setup-static-ip",
@@ -782,6 +846,7 @@ def main():
     frame_stride = max(1, int(args.stride if args.stride is not None else dpvo_cfg.get("frame_stride", 2)))
     vo_scale = float(args.vo_scale if args.vo_scale is not None else dpvo_cfg.get("vo_scale", 1.0))
     plot_mode = (args.plot_mode if args.plot_mode is not None else disp_cfg.get("plot_mode", "3d")).lower()
+    use_dpviewer = bool(args.dpviewer or dpvo_cfg.get("use_dpviewer", False))
 
     # Ensure DPVO dimensions are multiples of 16 for the feature pyramid
     vo_width = max(16, int(round(base_width * vo_scale)))
@@ -812,7 +877,7 @@ def main():
         f"Initializing DPVO (VO res: {vo_width}x{vo_height}, stride: {frame_stride}, "
         f"patches: {cfg.PATCHES_PER_FRAME}) on {device.upper()}..."
     )
-    slam = DPVO(cfg, weights_path, ht=vo_height, wd=vo_width, viz=False)
+    slam = DPVO(cfg, weights_path, ht=vo_height, wd=vo_width, viz=use_dpviewer)
     intrinsics = build_intrinsics(cam_cfg, base_width, base_height, vo_width, vo_height, device)
 
     stream.start()
@@ -823,6 +888,8 @@ def main():
     map_h = int(disp_cfg.get("map_height", 720))
     view_yaw = float(disp_cfg.get("view_yaw_deg", -35.0))
     view_pitch = float(disp_cfg.get("view_pitch_deg", 28.0))
+    show_pcl = bool(disp_cfg.get("show_pointcloud", True))
+    max_pcl = int(disp_cfg.get("max_pointcloud_points", 4000))
     window_title = disp_cfg.get("window_title", "Beagle Eyes - DJI Mini 5 Pro RTMP Visual Odometry")
 
     traj_plotter = TrajectoryMap(
@@ -832,6 +899,8 @@ def main():
         yaw_deg=view_yaw,
         pitch_deg=view_pitch,
         x_offset_on_window=feed_w,
+        show_pointcloud=show_pcl,
+        max_points=max_pcl,
     )
     traj_img = traj_plotter.update(0.0, 0.0, 0.0)
 
@@ -844,7 +913,10 @@ def main():
     print(f" DJI RC 2 Push URL : {stream.public_url}")
     print(f" Local Pull URL    : {stream.input_url}")
     print(f" VO Optimization   : Every {frame_stride} frame(s) @ {vo_width}x{vo_height}")
-    print(f" Trajectory Plot   : {plot_mode.upper()} (Left-Drag: Rotate | Right-Drag: Pan | Scroll: Zoom)")
+    print(
+        f" Trajectory Plot   : {plot_mode.upper()} + PointCloud={'ON' if show_pcl else 'OFF'} "
+        "(L-Drag: Rotate | R-Drag: Pan | Scroll: Zoom | 'p': Pts | 'v': 2D/3D)"
+    )
     print(" Press 'q' in the OpenCV window to exit.")
     print("============================================================")
 
@@ -897,9 +969,15 @@ def main():
                     vo_frames_window += 1
 
                     if slam.is_initialized and slam.n > 0:
-                        pose = SE3(slam.pg.poses_[slam.n - 1]).inv().data.cpu().numpy()
-                        x, y, z = pose[:3]
-                        traj_img = traj_plotter.update(x, y, z)
+                        # Extract all BA-refined keyframe poses in world coordinates (T_wc)
+                        all_poses = SE3(slam.pg.poses_[: slam.n]).inv().data.cpu().numpy()[:, :3]
+                        x, y, z = all_poses[-1]
+                        # Extract DPVO's live 3D sparse point cloud and RGB/BGR patch colors
+                        pcl_xyz = slam.pg.points_[: slam.m].cpu().numpy()
+                        pcl_bgr = slam.pg.colors_.view(-1, 3)[: slam.m].cpu().numpy()
+                        traj_img = traj_plotter.update(
+                            x, y, z, all_poses_xyz=all_poses, pcl_xyz=pcl_xyz, pcl_bgr=pcl_bgr
+                        )
                     else:
                         traj_img = traj_plotter.update(0.0, 0.0, 0.0)
 
