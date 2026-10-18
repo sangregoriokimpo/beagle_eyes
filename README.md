@@ -251,3 +251,76 @@ ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
   -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
   -f flv rtmp://127.0.0.1:1935/live/dji
 ```
+
+---
+
+## 7. Broadcasting Telemetry & Video to React Dashboard (Order of Operations)
+
+`beagle_eyes` includes a built-in low-latency broadcaster (`broadcast/broadcaster.py`) on port **`8765`** that streams live video (HTTP MJPEG + binary WebSocket JPEG frames) and 30Hz telemetry + 3D point clouds over WebSocket (`/ws`).
+
+### Step 0 (One-Time): Compile DPVO CUDA Extensions (If Needed)
+If `cuda_corr`, `cuda_ba`, or `lietorch_backends` ever need to be rebuilt:
+```bash
+./scripts/setup_dpvo.sh
+```
+
+### Step 1 — Terminal 1 (Laptop A): Start the Broadcaster (Port `8765`)
+Activate `visual_slam`, clean up any stale VO processes, and start **one** of the following broadcast sources:
+```bash
+conda activate visual_slam
+cd ~/beagle_eyes
+
+# Optional: kill any old background VO/mock processes holding port 8765
+pkill -9 -f "uav_vo.py|webcam_vo.py|mock_sender.py" || true
+
+# Option A — Mock 3D flight + point cloud (instant test, no drone or GPU needed)
+python broadcast/mock_sender.py
+# (Or stream real webcam video with mock 3D telemetry: python broadcast/mock_sender.py --webcam)
+
+# Option B — Laptop webcam + live DPVO
+python scripts/webcam_vo.py
+
+# Option C — DJI Drone RTMP + live DPVO
+python scripts/uav_vo.py --config config/uav_config.yaml --plot-mode 3d --stride 2 --vo-scale 0.5
+```
+Leave Terminal 1 running. You can verify the local stream immediately in a browser at `http://127.0.0.1:8765/`.
+
+### Step 2 — Terminal 2 (Laptop A): Start Cloudflare Tunnel (Cross-Network)
+If Laptop A and Laptop B are **not** on the same Wi-Fi/LAN, open a **second terminal** on Laptop A and run:
+```bash
+cd ~/beagle_eyes
+./scripts/start_cloudflare_tunnel.sh
+```
+Leave Terminal 2 running and copy the public `https://xxxx-xxxx-xxxx.trycloudflare.com` URL printed in the box.
+
+*(If both laptops are on the same Wi-Fi/LAN, you can skip Step 2 and use Laptop A's LAN IP printed by Terminal 1, e.g. `192.168.1.50:8765`.)*
+
+### Step 3 — Laptop B (Dashboard / Browser): Connect to the Stream
+1. **Browser Test Monitor**: Open `https://xxxx-xxxx-xxxx.trycloudflare.com` (or `http://<laptop-A-ip>:8765/`) in Chrome/Firefox to verify live video and WebSocket telemetry JSON.
+2. **React Integration**: Copy [`broadcast/useBeagleStream.ts`](broadcast/useBeagleStream.ts) into your React app and pass either the Cloudflare URL or LAN IP:
+   ```tsx
+   import { useBeagleStream } from "./hooks/useBeagleStream";
+
+   export function Dashboard() {
+     const { connected, imgRef, videoUrl, telemetry, pointCloudRef } = useBeagleStream(
+       "https://xxxx-xxxx-xxxx.trycloudflare.com" // or "192.168.1.50:8765" on same LAN
+     );
+
+     return (
+       <div>
+         {/* Live video feed (renders binary WebSocket frames over Cloudflare with 0 React re-renders) */}
+         <img ref={imgRef} src={videoUrl} alt="Live Feed" style={{ width: 640, height: 360 }} />
+
+         <div>Status: {connected ? "LIVE" : "RECONNECTING"}</div>
+         {telemetry && (
+           <div>
+             X: {telemetry.pose.position[0].toFixed(2)}m |
+             Y: {telemetry.pose.position[1].toFixed(2)}m |
+             Z: {telemetry.pose.position[2].toFixed(2)}m |
+             FPS: {telemetry.fps}
+           </div>
+         )}
+       </div>
+     );
+   }
+   ```
