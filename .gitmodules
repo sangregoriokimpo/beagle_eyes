@@ -1,3 +1,6 @@
 [submodule "vendor/Deep-Visual-Odometry-SLAM"]
 	path = vendor/Deep-Visual-Odometry-SLAM
 	url = https://github.com/chansoopark98/Deep-Visual-Odometry-SLAM.git
+[submodule "vendor/mediamtx"]
+	path = vendor/mediamtx
+	url = https://github.com/bluenviron/mediamtx.git
