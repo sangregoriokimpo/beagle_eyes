@@ -161,6 +161,8 @@ class GpsTransform:
         detections_3d: Optional[List[Dict[str, Any]]] = None,
         pcl_xyz: Optional[np.ndarray] = None,
         path_len_v: float = 0.0,
+        intrinsics: Optional[Sequence[float]] = None,
+        image_size: Optional[Sequence[int]] = None,
     ) -> Dict[str, Any]:
         """Build the `geo` block to merge into a telemetry packet."""
         pose = np.asarray(pose_wc_7d, dtype=np.float64).ravel()
@@ -195,7 +197,19 @@ class GpsTransform:
                 }
             )
 
+        camera = None
+        if intrinsics is not None and image_size is not None:
+            # Camera axes (x right, y down, z forward) as rows in ENU, so a pixel ray can be cast to the ground (z = 0).
+            r_ec = self._R_ev @ (quat_to_rotmat(*pose[3:7]) if pose.size >= 7 else np.eye(3))
+            camera = {
+                "enu": [round(float(v), 3) for v in drone_enu],
+                "axes_enu": [[round(float(v), 5) for v in r_ec[:, i]] for i in range(3)],
+                "intrinsics": [round(float(v), 3) for v in intrinsics],  # fx, fy, cx, cy in pixels
+                "image_size": [int(image_size[0]), int(image_size[1])],  # width, height
+            }
+
         return {
+            "camera": camera,
             "origin": {
                 "lat": self.cfg.origin_lat,
                 "lon": self.cfg.origin_lon,

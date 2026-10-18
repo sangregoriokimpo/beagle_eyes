@@ -95,6 +95,16 @@ def test_ground_plane_autocal_recovers_scale_and_gravity():
     assert np.allclose(tf._up_v, up, atol=0.02)
 
 
+def test_camera_block_axes_point_the_right_way():
+    tf = make(heading_deg=90, scale=1.0, start_height_m=10.0)  # level camera facing east
+    cam = tf.annotate([0, 0, 0, 0, 0, 0, 1], [], intrinsics=(500, 500, 320, 180), image_size=(640, 360))["camera"]
+    right, down, fwd = (np.array(a) for a in cam["axes_enu"])
+    assert np.allclose(fwd, [1, 0, 0], atol=1e-6)  # forward = east
+    assert np.allclose(down, [0, 0, -1], atol=1e-6)  # image-down = ENU down
+    assert np.allclose(right, [0, -1, 0], atol=1e-6)  # right of east-facing = south
+    assert cam["enu"][2] == 10.0 and cam["image_size"] == [640, 360]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

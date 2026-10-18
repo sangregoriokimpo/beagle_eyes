@@ -1248,7 +1248,12 @@ def main():
                                 gps_path_len_v += float(np.linalg.norm(np.asarray(pose_7d[:3]) - gps_last_pos))
                             gps_last_pos = np.asarray(pose_7d[:3], dtype=np.float64)
                         extra_telemetry["geo"] = gps_tf.annotate(
-                            pose_7d, latest_detections_3d, pcl_xyz=pcl_xyz, path_len_v=gps_path_len_v
+                            pose_7d,
+                            latest_detections_3d,
+                            pcl_xyz=pcl_xyz,
+                            path_len_v=gps_path_len_v,
+                            intrinsics=base_intrinsics_tuple,
+                            image_size=(base_width, base_height),
                         )
                     broadcaster.publish_telemetry(
                         pose=pose_7d,
