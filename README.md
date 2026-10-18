@@ -105,6 +105,7 @@ Interact directly with the trajectory / point cloud panel on the right side of t
 | **Right-Click + Drag** | Pan / drag the map across the canvas (works in 2D & 3D) |
 | **Mouse Scroll Wheel** | Zoom in / out (`0.25x` – `8.0x`) |
 | **Double Left-Click** or **`r`** | Reset rotation, pan, and zoom to default |
+| **`Spacebar`** | Dismiss / toggle the setup directions menu |
 | **`v`** | Toggle live between **2D** (top-down) and **3D** (perspective + point cloud) |
 | **`p`** | Toggle live **3D RGB Point Cloud** overlay ON / OFF (in 3D mode) |
 | **`q`** | Quit and cleanly stop FFmpeg & MediaMTX |
