@@ -84,3 +84,14 @@ display:
   feed_height: 720
   map_width: 540
   map_height: 720
+
+person_detection:
+  # Enable 2D instance segmentation + DPVO 3D frustum bounding box localization (--detect-people)
+  enabled: false
+  model: "checkpoints/yolo11n-seg.pt"
+  confidence: 0.45
+  # Run segmentation every Nth VO step (1 = every VO step)
+  stride: 1
+  # Keep spotted people anchored on the 3D map for N seconds after leaving camera view
+  memory_sec: 15.0
+
