@@ -17,8 +17,8 @@ network:
 mediamtx:
   # Automatically start MediaMTX inside uav_vo.py if port 1935 is not already listening
   auto_start: true
-  binary: "~/beagle_eyes/vendor/mediamtx/mediamtx"
-  config_file: "~/beagle_eyes/config/mediamtx.yml"
+  binary: "vendor/mediamtx/mediamtx"
+  config_file: "config/mediamtx.yml"
   version: "v1.11.3"
 
 rtmp:
@@ -45,7 +45,7 @@ rtmp:
 
   # Optional: save decoded JPEG frames to disk for dataset logging / debugging
   save_jpegs: false
-  jpeg_output_dir: "~/beagle_eyes/logs/uav_jpegs"
+  jpeg_output_dir: "logs/uav_jpegs"
 
 camera:
   model: "DJI Mini 5 Pro (24mm equiv, 16:9 1280x720)"
@@ -57,8 +57,8 @@ camera:
   intrinsics: null
 
 dpvo:
-  weights: "~/beagle_eyes/checkpoints/dpvo.pth"
-  config: "~/beagle_eyes/vendor/Deep-Visual-Odometry-SLAM/methods/dpvo/config/default.yaml"
+  weights: "checkpoints/dpvo.pth"
+  config: "vendor/Deep-Visual-Odometry-SLAM/methods/dpvo/config/default.yaml"
   # Run DPVO every Nth frame (1 = every frame, 2 = every 2nd frame @ 15Hz, 3 = every 3rd frame @ 10Hz)
   # Display still updates every frame at 30 FPS while VO only runs every frame_stride frames.
   frame_stride: 2

@@ -17,23 +17,26 @@ fi
 
 # Parse YAML config via python3
 read -r CFG_IFACE STATIC_IP PREFIX GATEWAY DNS PORT APP STREAM_KEY MTX_BIN MTX_VER < <(
-    python3 - "${CONFIG_FILE}" <<'PY'
+    python3 - "${CONFIG_FILE}" "${REPO_ROOT}" <<'PY'
 import os, sys, yaml
 with open(sys.argv[1], "r") as f:
     cfg = yaml.safe_load(f)
+repo_root = sys.argv[2]
 net = cfg.get("network", {})
 rtmp = cfg.get("rtmp", {})
 mtx = cfg.get("mediamtx", {})
+raw_bin = os.path.expanduser(mtx.get("binary", "vendor/mediamtx/mediamtx"))
+mtx_bin = raw_bin if os.path.isabs(raw_bin) else os.path.abspath(os.path.join(repo_root, raw_bin))
 print(
     net.get("interface", "auto"),
-    net.get("static_ip", "192.168.1.100"),
-    net.get("subnet_prefix", 24),
-    net.get("gateway", "192.168.1.1"),
-    net.get("dns", "8.8.8.8,1.1.1.1"),
+    net.get("static_ip", "172.20.10.2"),
+    net.get("subnet_prefix", 28),
+    net.get("gateway", "172.20.10.1"),
+    net.get("dns", "172.20.10.1,8.8.8.8,1.1.1.1"),
     rtmp.get("port", 1935),
     rtmp.get("app", "live"),
     rtmp.get("stream_key", "dji"),
-    os.path.expanduser(mtx.get("binary", "~/beagle_eyes/vendor/mediamtx/mediamtx")),
+    mtx_bin,
     mtx.get("version", "v1.11.3"),
 )
 PY

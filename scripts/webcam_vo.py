@@ -5,7 +5,10 @@ import time
 import os
 import sys
 
-REPO_DIR = os.path.expanduser("~/beagle_eyes/vendor/Deep-Visual-Odometry-SLAM")
+from pathlib import Path
+
+BEAGLE_ROOT = Path(__file__).resolve().parent.parent
+REPO_DIR = str(BEAGLE_ROOT / "vendor" / "Deep-Visual-Odometry-SLAM")
 sys.path.append(os.path.join(REPO_DIR, "methods/dpvo"))
 
 from dpvo.dpvo import DPVO
@@ -64,7 +67,7 @@ class TrajectoryMap:
 
 def main():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    WEIGHTS = os.path.expanduser("~/beagle_eyes/checkpoints/dpvo.pth")
+    WEIGHTS = str(BEAGLE_ROOT / "checkpoints" / "dpvo.pth")
     CONFIG = os.path.join(REPO_DIR, "methods/dpvo/config/default.yaml")
 
     if not os.path.exists(WEIGHTS):

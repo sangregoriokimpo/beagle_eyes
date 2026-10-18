@@ -14,12 +14,21 @@ import numpy as np
 import torch
 import yaml
 
-REPO_DIR = os.path.expanduser("~/beagle_eyes/vendor/Deep-Visual-Odometry-SLAM")
+BEAGLE_ROOT = Path(__file__).resolve().parent.parent
+REPO_DIR = str(BEAGLE_ROOT / "vendor" / "Deep-Visual-Odometry-SLAM")
 sys.path.append(os.path.join(REPO_DIR, "methods/dpvo"))
 
 from dpvo.config import cfg
 from dpvo.dpvo import DPVO
 from dpvo.lietorch import SE3
+
+
+def resolve_repo_path(path_str: str) -> str:
+    """Resolves a path relative to BEAGLE_ROOT (or expands ~ / absolute paths)."""
+    expanded = os.path.expanduser(path_str)
+    if os.path.isabs(expanded):
+        return expanded
+    return str((BEAGLE_ROOT / expanded).resolve())
 
 
 def detect_active_ipv4(fallback_ip: str) -> str:
@@ -46,11 +55,11 @@ class MediaMTXServer:
 
     def __init__(self, mtx_cfg: dict, rtmp_port: int = 1935, on_publish_path=None):
         self.auto_start = bool(mtx_cfg.get("auto_start", True))
-        self.binary = os.path.expanduser(
-            mtx_cfg.get("binary", "~/beagle_eyes/vendor/mediamtx/mediamtx")
+        self.binary = resolve_repo_path(
+            mtx_cfg.get("binary", "vendor/mediamtx/mediamtx")
         )
-        self.config_file = os.path.expanduser(
-            mtx_cfg.get("config_file", "~/beagle_eyes/config/mediamtx.yml")
+        self.config_file = resolve_repo_path(
+            mtx_cfg.get("config_file", "config/mediamtx.yml")
         )
         self.port = int(rtmp_port)
         self.on_publish_path = on_publish_path
@@ -193,7 +202,7 @@ class RTMPJpegStream:
 
         self.save_jpegs = bool(rtmp_cfg.get("save_jpegs", False))
         self.jpeg_output_dir = Path(
-            os.path.expanduser(rtmp_cfg.get("jpeg_output_dir", "~/beagle_eyes/logs/uav_jpegs"))
+            resolve_repo_path(rtmp_cfg.get("jpeg_output_dir", "logs/uav_jpegs"))
         )
         if self.save_jpegs:
             self.jpeg_output_dir.mkdir(parents=True, exist_ok=True)
@@ -791,7 +800,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default=os.path.expanduser("~/beagle_eyes/config/uav_config.yaml"),
+        default=str(BEAGLE_ROOT / "config" / "uav_config.yaml"),
         help="Path to UAV YAML configuration file",
     )
     parser.add_argument(
@@ -825,7 +834,7 @@ def main():
     )
     args = parser.parse_args()
 
-    config_path = os.path.expanduser(args.config)
+    config_path = resolve_repo_path(args.config) if not os.path.exists(args.config) else os.path.abspath(args.config)
     if not os.path.exists(config_path):
         print(f"Error: Configuration file not found at {config_path}")
         sys.exit(1)
@@ -841,14 +850,14 @@ def main():
     disp_cfg = uav_cfg.get("display", {})
 
     if args.setup_static_ip or net_cfg.get("auto_configure_static_ip", False):
-        setup_script = os.path.expanduser("~/beagle_eyes/scripts/setup_uav_rtmp.sh")
+        setup_script = str(BEAGLE_ROOT / "scripts" / "setup_uav_rtmp.sh")
         print(f"Running automated MediaMTX & static IP setup: {setup_script}")
         subprocess.run(["bash", setup_script, config_path], check=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    weights_path = os.path.expanduser(dpvo_cfg.get("weights", "~/beagle_eyes/checkpoints/dpvo.pth"))
-    dpvo_config_path = os.path.expanduser(
-        dpvo_cfg.get("config", os.path.join(REPO_DIR, "methods/dpvo/config/default.yaml"))
+    weights_path = resolve_repo_path(dpvo_cfg.get("weights", "checkpoints/dpvo.pth"))
+    dpvo_config_path = resolve_repo_path(
+        dpvo_cfg.get("config", "vendor/Deep-Visual-Odometry-SLAM/methods/dpvo/config/default.yaml")
     )
 
     if not os.path.exists(weights_path):
