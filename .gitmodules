@@ -1,3 +1,3 @@
-[submodule "third_party/DPVO"]
-	path = third_party/DPVO
-	url = https://github.com/princeton-vl/DPVO.git 
+[submodule "vendor/Deep-Visual-Odometry-SLAM"]
+	path = vendor/Deep-Visual-Odometry-SLAM
+	url = https://github.com/chansoopark98/Deep-Visual-Odometry-SLAM.git
