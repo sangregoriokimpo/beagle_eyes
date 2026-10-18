@@ -62,7 +62,7 @@ echo "[4/4] Compiling DPVO CUDA extensions..."
 pip install -e "${DPVO_DIR}" --no-build-isolation
 
 echo "Verifying compiled extensions..."
-python -c "import sys; sys.path.insert(0, '${DPVO_DIR}'); import cuda_corr, cuda_ba, lietorch_backends; from dpvo.dpvo import DPVO; print('[OK] DPVO + cuda_corr, cuda_ba, and lietorch_backends imported successfully!')"
+python -c "import sys; sys.path.insert(0, '${DPVO_DIR}'); import torch, cuda_corr, cuda_ba, lietorch_backends; from dpvo.dpvo import DPVO; print('[OK] DPVO + cuda_corr, cuda_ba, and lietorch_backends imported successfully!')"
 
 echo "============================================================"
 echo " Setup Complete! You can now run:"
