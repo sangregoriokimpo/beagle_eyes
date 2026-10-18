@@ -1,6 +1,9 @@
 import base64
+from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
+import os
 import queue
 import socket
 import struct
@@ -9,6 +12,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from urllib.request import Request, urlopen
+import uuid
 
 import cv2
 import numpy as np
@@ -144,6 +149,33 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(jpeg)
             return
 
+        if path in ("/snapshot", "/bundle"):
+            export_token = os.getenv("BEAGLE_EXPORT_TOKEN", "")
+            if export_token and not hmac.compare_digest(
+                self.headers.get("Authorization", ""), "Bearer " + export_token
+            ):
+                self.send_response(401)
+                self._send_cors_headers()
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            bundle = b.get_firesight_bundle()
+            if bundle is None:
+                self.send_response(204)
+                self._send_cors_headers()
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self._send_cors_headers()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(bundle)))
+            self.end_headers()
+            self.wfile.write(bundle)
+            return
+
         if path in ("/status", "/health"):
             body = json.dumps(b.get_status()).encode("utf-8")
             self.send_response(200)
@@ -266,12 +298,13 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
 
 class TelemetryBroadcaster:
     """
-    Low-latency HTTP MJPEG + WebSocket telemetry broadcaster for React dashboards.
+    Low-latency HTTP MJPEG + WebSocket telemetry broadcaster for React & FireSight dashboards.
 
     Serves on a single port (default 8765):
       - Video Stream (MJPEG) : http://<laptop-ip>:8765/video.mjpg
       - Telemetry WebSocket  : ws://<laptop-ip>:8765/ws
       - Snapshot JPEG        : http://<laptop-ip>:8765/snapshot.jpg
+      - FireSight Bundle     : http://<laptop-ip>:8765/snapshot
       - Health / Status JSON : http://<laptop-ip>:8765/status
       - Browser Test Page    : http://<laptop-ip>:8765/
     """
@@ -294,19 +327,29 @@ class TelemetryBroadcaster:
 
         self.lan_ip = detect_lan_ip()
         self.is_running = False
+        self.session_id = str(uuid.uuid4())
 
         self._jpeg_cond = threading.Condition()
         self._latest_jpeg: Optional[bytes] = None
         self._jpeg_seq: int = 0
+        self._has_real_frame: bool = False
+        self._last_real_frame_time: float = 0.0
 
         self._ws_lock = threading.Lock()
         self._ws_clients: List[_WSClient] = []
         self._latest_telemetry_bytes: Optional[bytes] = None
+        self._latest_telemetry_dict: Optional[Dict[str, Any]] = None
         self._last_pcl_sent_time: float = 0.0
         self._trajectory_history: List[List[float]] = []
 
+        self._bundle_lock = threading.Lock()
+        self._latest_bundle_bytes: Optional[bytes] = None
+        self._last_bundle_time: float = 0.0
+        self._push_queue: "queue.Queue[bytes]" = queue.Queue(maxsize=1)
+
         self._server: Optional[_BroadcastHTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
+        self._push_thread: Optional[threading.Thread] = None
 
     @property
     def video_url(self) -> str:
@@ -319,6 +362,10 @@ class TelemetryBroadcaster:
     @property
     def status_url(self) -> str:
         return f"http://{self.lan_ip}:{self.port}/status"
+
+    @property
+    def snapshot_url(self) -> str:
+        return f"http://{self.lan_ip}:{self.port}/snapshot"
 
     def start(self) -> "TelemetryBroadcaster":
         if self.is_running:
@@ -353,14 +400,24 @@ class TelemetryBroadcaster:
                 1,
                 cv2.LINE_AA,
             )
-            self.publish_frame(frame_bgr=placeholder)
-            self.publish_telemetry(pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], frame_id=0, fps=0.0, initialized=False)
+            self.publish_frame(frame_bgr=placeholder, _is_placeholder=True)
+            self.publish_telemetry(
+                pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+                frame_id=0,
+                fps=0.0,
+                initialized=False,
+                _is_placeholder=True,
+            )
         self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._server_thread.start()
+        if os.getenv("FIRESIGHT_URL"):
+            self._push_thread = threading.Thread(target=self._push_worker, daemon=True)
+            self._push_thread.start()
         print(f"[Broadcast] Server running on port {self.port}:")
-        print(f"  -> Video (MJPEG) : {self.video_url}")
-        print(f"  -> Telemetry (WS): {self.ws_url}")
-        print(f"  -> Test Preview  : http://{self.lan_ip}:{self.port}/")
+        print(f"  -> Video (MJPEG)    : {self.video_url}")
+        print(f"  -> Telemetry (WS)   : {self.ws_url}")
+        print(f"  -> FireSight Bundle : {self.snapshot_url}")
+        print(f"  -> Test Preview     : http://{self.lan_ip}:{self.port}/")
         return self
 
     def stop(self) -> None:
@@ -381,7 +438,12 @@ class TelemetryBroadcaster:
                 pass
             self._server = None
 
-    def publish_frame(self, frame_bgr: Optional[np.ndarray] = None, jpeg_bytes: Optional[bytes] = None) -> None:
+    def publish_frame(
+        self,
+        frame_bgr: Optional[np.ndarray] = None,
+        jpeg_bytes: Optional[bytes] = None,
+        _is_placeholder: bool = False,
+    ) -> None:
         if not self.is_running:
             return
         if jpeg_bytes is None:
@@ -395,12 +457,18 @@ class TelemetryBroadcaster:
         with self._jpeg_cond:
             self._latest_jpeg = jpeg_bytes
             self._jpeg_seq += 1
+            if not _is_placeholder:
+                self._has_real_frame = True
+                self._last_real_frame_time = time.time()
             self._jpeg_cond.notify_all()
 
         ws_bin_frame = _encode_ws_frame(jpeg_bytes, opcode=0x2)
         with self._ws_lock:
             for client in self._ws_clients:
                 client.enqueue(ws_bin_frame)
+
+        if not _is_placeholder:
+            self._maybe_update_bundle()
 
     def publish_telemetry(
         self,
@@ -414,6 +482,7 @@ class TelemetryBroadcaster:
         pcl_xyz: Optional[np.ndarray] = None,
         pcl_bgr: Optional[np.ndarray] = None,
         extra: Optional[Dict[str, Any]] = None,
+        _is_placeholder: bool = False,
     ) -> None:
         if not self.is_running:
             return
@@ -470,11 +539,110 @@ class TelemetryBroadcaster:
 
         raw_json = json.dumps(packet, separators=(",", ":")).encode("utf-8")
         self._latest_telemetry_bytes = raw_json
+        if not _is_placeholder:
+            # Store telemetry copy (without bulky point_cloud array) for FireSight bundle metadata
+            lite_packet = {k: v for k, v in packet.items() if k != "point_cloud"}
+            self._latest_telemetry_dict = lite_packet
         ws_frame = _encode_ws_frame(raw_json, opcode=0x1)
 
         with self._ws_lock:
             for client in self._ws_clients:
                 client.enqueue(ws_frame)
+
+        if not _is_placeholder:
+            self._maybe_update_bundle()
+
+    def _maybe_update_bundle(self) -> None:
+        now = time.time()
+        if not self._has_real_frame or self._latest_telemetry_dict is None:
+            return
+        if now - self._last_bundle_time < 0.45:
+            return
+        with self._jpeg_cond:
+            jpeg = self._latest_jpeg
+            seq = self._jpeg_seq
+        if not jpeg:
+            return
+        telemetry = dict(self._latest_telemetry_dict)
+        # Ensure monotonically increasing source frame_id for deduplication
+        source_frame_id = max(int(telemetry.get("frame_id", 0)), int(seq))
+        telemetry["frame_id"] = source_frame_id
+        observed = float(telemetry.get("timestamp") or now)
+        sha256_hex = hashlib.sha256(jpeg).hexdigest()
+        jpeg_b64 = base64.b64encode(jpeg).decode("ascii")
+        frame_uuid = str(uuid.uuid5(uuid.UUID(self.session_id), str(source_frame_id)))
+        pos = telemetry.get("pose", {}).get("position")
+        initialized = bool(telemetry.get("initialized", False))
+        context: Dict[str, Any] = {
+            "producer": "beagle_eyes",
+            "odometry_initialized": initialized,
+        }
+        if pos is not None:
+            context["latest_keyframe_pose"] = {
+                "translation": [float(v) for v in pos[:3]],
+                "units": "meters_vo",
+                "transform": "camera_to_world",
+            }
+        metadata = {
+            "schema_version": "firesight.frame.v1",
+            "frame_id": frame_uuid,
+            "session_id": self.session_id,
+            "source_frame_id": source_frame_id,
+            "received_at": datetime.fromtimestamp(observed, timezone.utc).isoformat(),
+            "image": {"sha256": sha256_hex},
+            "telemetry": telemetry,
+            "context": context,
+        }
+        bundle_bytes = json.dumps(
+            {
+                "session_id": self.session_id,
+                "telemetry": telemetry,
+                "jpeg_base64": jpeg_b64,
+                "sha256": sha256_hex,
+                "metadata": metadata,
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with self._bundle_lock:
+            self._latest_bundle_bytes = bundle_bytes
+            self._last_bundle_time = now
+        if os.getenv("FIRESIGHT_URL"):
+            try:
+                self._push_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._push_queue.put_nowait(bundle_bytes)
+            except queue.Full:
+                pass
+
+    def get_firesight_bundle(self) -> Optional[bytes]:
+        with self._bundle_lock:
+            if self._latest_bundle_bytes is None or (time.time() - self._last_bundle_time) > 5.0:
+                return None
+            return self._latest_bundle_bytes
+
+    def _push_worker(self) -> None:
+        base_url = os.getenv("FIRESIGHT_URL", "").rstrip("/")
+        if not base_url:
+            return
+        ingest_url = base_url + "/ingest/beagle"
+        while self.is_running:
+            try:
+                payload = self._push_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            token = os.getenv("INGEST_TOKEN", "")
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = "Bearer " + token
+            req = Request(ingest_url, data=payload, headers=headers)
+            try:
+                with urlopen(req, timeout=5.0) as resp:
+                    resp.read()
+            except Exception:
+                pass
+            time.sleep(0.5)
 
     def _format_point_cloud(
         self,
