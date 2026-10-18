@@ -24,6 +24,7 @@ from broadcast import TelemetryBroadcaster
 from dpvo.config import cfg
 from dpvo.dpvo import DPVO
 from dpvo.lietorch import SE3
+from survey import PersonDetector3D
 
 
 def resolve_repo_path(path_str: str) -> str:
@@ -399,6 +400,8 @@ class TrajectoryMap:
         self.history = []  # list of (x, y, z)
         self.pcl_xyz = None   # (N, 3) numpy array in camera coords (x, y, z)
         self.pcl_bgr = None   # (N, 3) uint8 numpy array in BGR order
+        self.show_boxes_3d = True
+        self.detections_3d = []
 
     def toggle_mode(self):
         self.mode = "2d" if self.mode == "3d" else "3d"
@@ -407,6 +410,11 @@ class TrajectoryMap:
 
     def toggle_pointcloud(self):
         self.show_pointcloud = not self.show_pointcloud
+        self.dirty = False
+        return self.render()
+
+    def toggle_boxes_3d(self):
+        self.show_boxes_3d = not self.show_boxes_3d
         self.dirty = False
         return self.render()
 
@@ -462,7 +470,7 @@ class TrajectoryMap:
                 self.zoom = float(np.clip(self.zoom / 1.12, 0.25, 8.0))
             self.dirty = True
 
-    def update(self, x, y=0.0, z=0.0, all_poses_xyz=None, pcl_xyz=None, pcl_bgr=None):
+    def update(self, x, y=0.0, z=0.0, all_poses_xyz=None, pcl_xyz=None, pcl_bgr=None, detections_3d=None):
         if all_poses_xyz is not None and len(all_poses_xyz) > 0:
             self.history = [(float(p[0]), float(p[1]), float(p[2])) for p in all_poses_xyz[-1500:]]
         else:
@@ -477,6 +485,9 @@ class TrajectoryMap:
                 pcl_bgr = pcl_bgr[idx]
             self.pcl_xyz = pcl_xyz
             self.pcl_bgr = pcl_bgr
+
+        if detections_3d is not None:
+            self.detections_3d = detections_3d
 
         self.dirty = False
         return self.render()
@@ -502,7 +513,12 @@ class TrajectoryMap:
         cv2.line(self.canvas, (0, cy), (self.w, cy), (60, 60, 60), 1)
 
         pts = np.array([[p[0], p[2]] for p in self.history], dtype=np.float32)
-        max_dist = max(float(np.max(np.abs(pts))), 0.5) / self.zoom
+        base_2d = max(float(np.max(np.abs(pts))), 0.5)
+        if self.show_boxes_3d and self.detections_3d:
+            for det in self.detections_3d:
+                dc = det["center"]
+                base_2d = max(base_2d, abs(float(dc[0])) * 1.15, abs(float(dc[2])) * 1.15)
+        max_dist = base_2d / self.zoom
         scale = (min(self.w, self.h) * 0.42) / max_dist
 
         pixel_pts = []
@@ -518,6 +534,29 @@ class TrajectoryMap:
             cv2.circle(self.canvas, pixel_pts[0], 6, (0, 255, 0), -1)
             cv2.circle(self.canvas, pixel_pts[-1], 8, (255, 0, 255), -1)
 
+        # Draw 2D top-down person bounding footprints
+        if self.show_boxes_3d and self.detections_3d:
+            for det in self.detections_3d:
+                bx, _, bz = det["center"]
+                bw, _, bd = det["size"]
+                active = det.get("active", False)
+                color = (80, 255, 120) if active else (70, 160, 190)
+                u1 = int(cx + (bx - bw * 0.5) * scale)
+                v1 = int(cy - (bz + bd * 0.5) * scale)
+                u2 = int(cx + (bx + bw * 0.5) * scale)
+                v2 = int(cy - (bz - bd * 0.5) * scale)
+                cv2.rectangle(self.canvas, (u1, v1), (u2, v2), color, 2)
+                cv2.putText(
+                    self.canvas,
+                    f"P#{det['id']} ({det['distance_m']:.1f}m)",
+                    (u1, max(v1 - 6, 90)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
         cv2.putText(
             self.canvas,
             "2D TOP-DOWN TRAJECTORY (X-Z)",
@@ -529,19 +568,19 @@ class TrajectoryMap:
         )
         cv2.putText(
             self.canvas,
-            f"Window: +/-{max_dist:.1f}m | Press 'v' for 3D",
+            f"Window: +/-{max_dist:.1f}m | People: {len(self.detections_3d)} | Press 'v' for 3D",
             (20, 65),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.46,
             (160, 160, 160),
             1,
         )
         cv2.putText(
             self.canvas,
-            "Right-Drag: Pan | Scroll: Zoom | Dbl-Click: Reset",
+            "Right-Drag: Pan | Scroll: Zoom | [b] 3D Boxes | Dbl-Click: Reset",
             (20, self.h - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.43,
+            0.41,
             (180, 180, 180),
             1,
         )
@@ -579,12 +618,15 @@ class TrajectoryMap:
         # Convert camera (x, y_down, z_forward) -> world (x, z_forward, alt_up = -y)
         pts_3d = np.array([[p[0], p[2], -p[1]] for p in self.history], dtype=np.float32)
         base_dist = max(float(np.max(np.abs(pts_3d))), 0.5)
+        if self.show_boxes_3d and self.detections_3d:
+            for det in self.detections_3d:
+                dc = det["center"]
+                base_dist = max(base_dist, abs(float(dc[0])) * 1.1, abs(float(dc[2])) * 1.1, 1.5)
         max_dist = base_dist / self.zoom
         scale = (min(self.w, self.h) * 0.36) / max_dist
 
         # 1. Draw 3D ground grid on the (X, Z, Alt=0) plane
         grid_steps = 4
-        step_m = base_dist / grid_steps
         grid_vals = np.linspace(-base_dist, base_dist, 2 * grid_steps + 1)
         for gv in grid_vals:
             line_x = np.array([[gv, -base_dist, 0.0], [gv, base_dist, 0.0]], dtype=np.float32)
@@ -671,6 +713,60 @@ class TrajectoryMap:
         cv2.circle(self.canvas, tuple(shadow_px[-1]), 4, (100, 100, 120), -1)
         cv2.circle(self.canvas, tuple(traj_px[-1]), 7, (255, 0, 255), -1)
 
+        # 5. Draw 3D Person Wireframe Bounding Boxes (8 corners, 12 edges + ground drop-line)
+        if self.show_boxes_3d and self.detections_3d:
+            box_edges = [
+                (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
+                (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
+                (0, 4), (1, 5), (2, 6), (3, 7),  # Vertical pillars
+            ]
+            for det in self.detections_3d:
+                bx, by_down, bz = det["center"]
+                bw, bh, bd = det["size"]
+                balt = -by_down
+                hx, hz, hh = bw * 0.5, bd * 0.5, bh * 0.5
+
+                corners = np.array(
+                    [
+                        [bx - hx, bz - hz, balt - hh],
+                        [bx + hx, bz - hz, balt - hh],
+                        [bx + hx, bz + hz, balt - hh],
+                        [bx - hx, bz + hz, balt - hh],
+                        [bx - hx, bz - hz, balt + hh],
+                        [bx + hx, bz - hz, balt + hh],
+                        [bx + hx, bz + hz, balt + hh],
+                        [bx - hx, bz + hz, balt + hh],
+                        [bx, bz, balt + hh + 0.12],  # Label anchor above top center
+                        [bx, bz, 0.0],               # Ground shadow anchor
+                    ],
+                    dtype=np.float32,
+                )
+                proj_c = self._project_3d(corners, scale, cx, cy)
+                active = det.get("active", False)
+                color = (80, 255, 120) if active else (70, 165, 210)
+                thickness = 2 if active else 1
+
+                # Drop-line to ground plane
+                bot_center = ((proj_c[0] + proj_c[2]) // 2).tolist()
+                cv2.line(self.canvas, tuple(bot_center), tuple(proj_c[9]), (60, 110, 80), 1, cv2.LINE_AA)
+                cv2.circle(self.canvas, tuple(proj_c[9]), 3, color, -1)
+
+                for i0, i1 in box_edges:
+                    cv2.line(self.canvas, tuple(proj_c[i0]), tuple(proj_c[i1]), color, thickness, cv2.LINE_AA)
+
+                lbl = f"P#{det['id']} {det['distance_m']:.1f}m"
+                lx, ly = int(proj_c[8][0]) - 24, max(int(proj_c[8][1]) - 4, 100)
+                cv2.putText(
+                    self.canvas,
+                    lbl,
+                    (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
         cur_x, cur_z, cur_alt = pts_3d[-1]
         cv2.putText(
             self.canvas,
@@ -683,10 +779,10 @@ class TrajectoryMap:
         )
         cv2.putText(
             self.canvas,
-            f"Scale: +/-{max_dist:.1f}m | Alt: {cur_alt:+.2f}m | 3D Pts: {num_pcl_drawn}",
+            f"Scale: +/-{max_dist:.1f}m | Alt: {cur_alt:+.2f}m | Pts: {num_pcl_drawn} | People: {len(self.detections_3d)}",
             (20, 62),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.43,
             (170, 210, 230),
             1,
         )
@@ -701,10 +797,10 @@ class TrajectoryMap:
         )
         cv2.putText(
             self.canvas,
-            "L-Drag: Rotate | R-Drag: Pan | [p] Pts | [v] 2D/3D",
+            "L-Drag: Rotate | R-Drag: Pan | [p] Pts | [b] Boxes | [v] 2D/3D",
             (20, self.h - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
+            0.40,
             (180, 180, 180),
             1,
         )
@@ -782,7 +878,7 @@ def build_intrinsics(
 
 
 def handle_key(key: int, traj_plotter: TrajectoryMap, show_directions: bool):
-    """Handles keyboard shortcuts for quitting, toggling 2D/3D, point cloud, directions, and resetting view."""
+    """Handles keyboard shortcuts for quitting, toggling 2D/3D, point cloud, 3D boxes, directions, and resetting view."""
     if key == ord("q"):
         return True, None, show_directions
     if key == ord(" "):
@@ -791,6 +887,8 @@ def handle_key(key: int, traj_plotter: TrajectoryMap, show_directions: bool):
         return False, traj_plotter.toggle_mode(), show_directions
     if key == ord("p"):
         return False, traj_plotter.toggle_pointcloud(), show_directions
+    if key == ord("b"):
+        return False, traj_plotter.toggle_boxes_3d(), show_directions
     if key == ord("r"):
         return False, traj_plotter.reset_view(), show_directions
     return False, None, show_directions
@@ -826,6 +924,17 @@ def main():
         help="Override dpvo.vo_scale (e.g., 0.5 to run DPVO at half resolution while displaying full 720p)",
     )
     parser.add_argument(
+        "--detect-people",
+        action="store_true",
+        help="Enable 2D person instance segmentation + 3D DPVO frustum bounding boxes in the 3D odom map",
+    )
+    parser.add_argument(
+        "--detect-conf",
+        type=float,
+        default=None,
+        help="Confidence threshold for person segmentation (default: 0.45)",
+    )
+    parser.add_argument(
         "--dpviewer",
         action="store_true",
         help="Also launch DPVO's native Pangolin OpenGL 3D Viewer (requires modules/DPViewer installed)",
@@ -851,6 +960,7 @@ def main():
     cam_cfg = uav_cfg.get("camera", {})
     dpvo_cfg = uav_cfg.get("dpvo", {})
     disp_cfg = uav_cfg.get("display", {})
+    person_cfg = uav_cfg.get("person_detection", {})
 
     if args.setup_static_ip or net_cfg.get("auto_configure_static_ip", False):
         setup_script = str(BEAGLE_ROOT / "scripts" / "setup_uav_rtmp.sh")
@@ -874,6 +984,8 @@ def main():
     vo_scale = float(args.vo_scale if args.vo_scale is not None else dpvo_cfg.get("vo_scale", 1.0))
     plot_mode = (args.plot_mode if args.plot_mode is not None else disp_cfg.get("plot_mode", "3d")).lower()
     use_dpviewer = bool(args.dpviewer or dpvo_cfg.get("use_dpviewer", False))
+    detect_people = bool(args.detect_people or person_cfg.get("enabled", False))
+    detect_conf = float(args.detect_conf if args.detect_conf is not None else person_cfg.get("confidence", 0.45))
 
     # Ensure DPVO dimensions are multiples of 16 for the feature pyramid
     vo_width = max(16, int(round(base_width * vo_scale)))
@@ -906,6 +1018,18 @@ def main():
     )
     slam = DPVO(cfg, weights_path, ht=vo_height, wd=vo_width, viz=use_dpviewer)
     intrinsics = build_intrinsics(cam_cfg, base_width, base_height, vo_width, vo_height, device)
+    base_intrinsics_tensor = build_intrinsics(cam_cfg, base_width, base_height, base_width, base_height, "cpu")
+    base_intrinsics_tuple = tuple(float(v) for v in base_intrinsics_tensor.tolist())
+
+    person_detector = None
+    if detect_people:
+        seg_model_path = resolve_repo_path(person_cfg.get("model", "checkpoints/yolo11n-seg.pt"))
+        person_detector = PersonDetector3D(
+            model_path=seg_model_path,
+            conf_thres=detect_conf,
+            device=device,
+            memory_sec=float(person_cfg.get("memory_sec", 15.0)),
+        )
 
     stream.start()
 
@@ -940,9 +1064,10 @@ def main():
     print(f" DJI RC 2 Push URL : {stream.public_url}")
     print(f" Local Pull URL    : {stream.input_url}")
     print(f" VO Optimization   : Every {frame_stride} frame(s) @ {vo_width}x{vo_height}")
+    print(f" 3D Person Survey  : {'ENABLED (press b to toggle boxes)' if detect_people else 'DISABLED (pass --detect-people to enable)'}")
     print(
         f" Trajectory Plot   : {plot_mode.upper()} + PointCloud={'ON' if show_pcl else 'OFF'} "
-        "(L-Drag: Rotate | R-Drag: Pan | Scroll: Zoom | 'p': Pts | 'v': 2D/3D)"
+        "(L-Drag: Rotate | R-Drag: Pan | Scroll: Zoom | 'p': Pts | 'b': Boxes | 'v': 2D/3D)"
     )
     print(" Press SPACE to hide/show instructions, or 'q' to exit.")
     print("============================================================")
@@ -960,6 +1085,7 @@ def main():
     x, y, z = 0.0, 0.0, 0.0
     last_feed_display = None
     show_directions = True
+    latest_detections_3d = []
 
     try:
         with torch.no_grad():
@@ -995,9 +1121,6 @@ def main():
                 frames_total += 1
                 vid_frames_window += 1
 
-                # Publish every incoming video frame immediately (reuses jpeg_bytes with zero re-encoding)
-                broadcaster.publish_frame(frame_bgr=frame, jpeg_bytes=jpeg_bytes)
-
                 # Run DPVO odometry every `frame_stride` frames
                 if (frames_total - 1) % frame_stride == 0:
                     if frame.shape[0] != vo_height or frame.shape[1] != vo_width:
@@ -1025,13 +1148,32 @@ def main():
                         x, y, z = all_poses[-1]
                         # Extract DPVO's live 3D sparse point cloud and RGB/BGR patch colors
                         pcl_xyz = slam.pg.points_[: slam.m].cpu().numpy()
-                        pcl_bgr = slam.pg.colors_.view(-1, 3)[: slam.m].cpu().numpy()
+                        pcl_bgr = slam.pg.colors_.view(-1, 3)[: slam.m].cpu().numpy().copy()
+
+                    if person_detector is not None:
+                        latest_detections_3d, person_pcl_mask = person_detector.update(
+                            frame, pose_7d, base_intrinsics_tuple, pcl_xyz=pcl_xyz
+                        )
+                        # Highlight DPVO 3D points belonging to segmented people in bright neon green
+                        if person_pcl_mask is not None and pcl_bgr is not None and np.any(person_pcl_mask):
+                            pcl_bgr[person_pcl_mask] = np.array([80, 255, 100], dtype=np.uint8)
+
+                    if slam.is_initialized and slam.n > 0:
                         traj_img = traj_plotter.update(
-                            x, y, z, all_poses_xyz=all_poses, pcl_xyz=pcl_xyz, pcl_bgr=pcl_bgr
+                            x,
+                            y,
+                            z,
+                            all_poses_xyz=all_poses,
+                            pcl_xyz=pcl_xyz,
+                            pcl_bgr=pcl_bgr,
+                            detections_3d=latest_detections_3d,
                         )
                     else:
-                        traj_img = traj_plotter.update(0.0, 0.0, 0.0)
+                        traj_img = traj_plotter.update(0.0, 0.0, 0.0, detections_3d=latest_detections_3d)
 
+                    clean_dets = [
+                        {k: v for k, v in d.items() if not k.startswith("_")} for d in latest_detections_3d
+                    ]
                     broadcaster.publish_telemetry(
                         pose=pose_7d,
                         frame_id=seq,
@@ -1042,6 +1184,7 @@ def main():
                         all_poses_xyz=all_poses,
                         pcl_xyz=pcl_xyz,
                         pcl_bgr=pcl_bgr,
+                        extra={"detections_3d": clean_dets},
                     )
 
                 elapsed = time.time() - t_start
@@ -1054,6 +1197,12 @@ def main():
 
                 jpeg_kb = len(jpeg_bytes) / 1024.0 if jpeg_bytes else 0.0
                 feed_display = frame.copy()
+                if person_detector is not None and traj_plotter.show_boxes_3d:
+                    PersonDetector3D.draw_2d_overlay(feed_display, latest_detections_3d)
+                    broadcaster.publish_frame(frame_bgr=feed_display)
+                else:
+                    broadcaster.publish_frame(frame_bgr=frame, jpeg_bytes=jpeg_bytes)
+
                 cv2.rectangle(feed_display, (15, 15), (720, 115), (15, 15, 15), -1)
                 cv2.rectangle(feed_display, (15, 15), (720, 115), (80, 80, 80), 1)
 
@@ -1078,12 +1227,17 @@ def main():
                         2,
                     )
 
+                seg_info = (
+                    f" | Seg: {person_detector.last_infer_ms:.1f}ms ({len(latest_detections_3d)}P)"
+                    if person_detector is not None
+                    else ""
+                )
                 cv2.putText(
                     feed_display,
-                    f"Vid: {vid_fps:4.1f}FPS | VO(1/{frame_stride}): {infer_ms:4.1f}ms ({vo_hz:4.1f}Hz) | KF: {slam.n} | {jpeg_kb:3.0f}KB",
+                    f"Vid: {vid_fps:4.1f}FPS | VO(1/{frame_stride}): {infer_ms:4.1f}ms ({vo_hz:4.1f}Hz) | KF: {slam.n}{seg_info}",
                     (30, 88),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.50,
+                    0.48,
                     (0, 220, 255),
                     1,
                 )

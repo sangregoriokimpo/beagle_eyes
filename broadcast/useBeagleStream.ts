@@ -11,6 +11,18 @@ export interface BeaglePointCloud {
   colors: Uint8Array;      // Flat [r0, g0, b0, r1, g1, b1, ...] in 0..255 RGB
 }
 
+export interface BeagleDetection3D {
+  id: number;
+  label: string;
+  conf: number;
+  active: boolean;
+  distance_m: number;
+  points_hit: number;
+  center: [number, number, number]; // [x, y_down, z_forward] in meters
+  size: [number, number, number];   // [width, height, depth] in meters
+  bbox_2d: [number, number, number, number]; // [u1, v1, u2, v2] in pixels
+}
+
 export interface BeagleTelemetry {
   timestamp: number;
   frame_id: number;
@@ -20,6 +32,7 @@ export interface BeagleTelemetry {
   infer_ms?: number;
   pose: BeaglePose;
   trajectory: [number, number, number][];
+  detections_3d?: BeagleDetection3D[];
 }
 
 export function useBeagleStream(hostAndPort = "127.0.0.1:8765") {
@@ -91,6 +104,7 @@ export function useBeagleStream(hostAndPort = "127.0.0.1:8765") {
             infer_ms: msg.infer_ms,
             pose: msg.pose,
             trajectory: msg.trajectory ?? [],
+            detections_3d: msg.detections_3d ?? [],
           });
         } catch {
           // Ignore malformed packet

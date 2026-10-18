@@ -198,6 +198,9 @@ python scripts/uav_vo.py --stride 2 --vo-scale 0.5
 
 # Combine all flags
 python scripts/uav_vo.py --config config/uav_config.yaml --plot-mode 3d --stride 2 --vo-scale 0.5
+
+# Enable 3D person instance segmentation + 3D bounding boxes in the odom map (survey/person_3d.py)
+python scripts/uav_vo.py --config config/uav_config.yaml --plot-mode 3d --stride 2 --vo-scale 0.5 --detect-people
 ```
 
 ### DJI Mini 5 Pro (RC 2) Controller Settings
@@ -218,6 +221,9 @@ To test DPVO directly using `/dev/video0` (local webcam):
 
 ```bash
 python scripts/webcam_vo.py
+
+# With 3D person segmentation + bounding boxes enabled:
+python scripts/webcam_vo.py --detect-people
 ```
 
 ---
@@ -234,6 +240,7 @@ Interact directly with the trajectory / point cloud panel on the right side of t
 | **Double Left-Click** or **`r`** | Reset rotation, pan, and zoom to default |
 | **`v`** | Toggle live between **2D** (top-down) and **3D** (perspective + point cloud) |
 | **`p`** | Toggle live **3D RGB Point Cloud** overlay ON / OFF (in 3D mode) |
+| **`b`** | Toggle **3D Person Bounding Boxes** & 2D masks ON / OFF (when `--detect-people` is active) |
 | **`q`** | Quit and cleanly stop FFmpeg & MediaMTX |
 
 ---
