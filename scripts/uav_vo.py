@@ -700,8 +700,20 @@ class TrajectoryMap:
         return self.canvas
 
 
-def render_waiting_screen(width: int, height: int, public_url: str, active_ip: str):
+def render_waiting_screen(width: int, height: int, public_url: str, active_ip: str, show_directions: bool = True):
     canvas = np.full((height, width, 3), 18, dtype=np.uint8)
+    if not show_directions:
+        cv2.putText(
+            canvas,
+            "Waiting for video stream... (Press SPACE for setup instructions)",
+            (60, height // 2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.60,
+            (130, 130, 130),
+            1,
+        )
+        return canvas
+
     cv2.rectangle(canvas, (40, 40), (width - 40, height - 40), (70, 70, 70), 1)
     cv2.putText(
         canvas,
@@ -718,6 +730,7 @@ def render_waiting_screen(width: int, height: int, public_url: str, active_ip: s
         f"3. Enter RTMP URL: {public_url}",
         "4. Select 720p (1280x720) @ 30fps and tap Start Live Stream",
         "Map: Left-Drag = Rotate | Right-Drag = Pan | 'p' = PointCloud | 'v' = 2D/3D",
+        "Press SPACEBAR to hide this menu, or 'q' to exit.",
     ]
     for idx, line in enumerate(steps):
         cv2.putText(
@@ -756,17 +769,19 @@ def build_intrinsics(
     return torch.tensor([fx * sx, fy * sy, cx * sx, cy * sy], dtype=torch.float32, device=device)
 
 
-def handle_key(key: int, traj_plotter: TrajectoryMap):
-    """Handles keyboard shortcuts for quitting, toggling 2D/3D, point cloud, and resetting view."""
+def handle_key(key: int, traj_plotter: TrajectoryMap, show_directions: bool):
+    """Handles keyboard shortcuts for quitting, toggling 2D/3D, point cloud, directions, and resetting view."""
     if key == ord("q"):
-        return True, None
+        return True, None, show_directions
+    if key == ord(" "):
+        return False, None, not show_directions
     if key == ord("v"):
-        return False, traj_plotter.toggle_mode()
+        return False, traj_plotter.toggle_mode(), show_directions
     if key == ord("p"):
-        return False, traj_plotter.toggle_pointcloud()
+        return False, traj_plotter.toggle_pointcloud(), show_directions
     if key == ord("r"):
-        return False, traj_plotter.reset_view()
-    return False, None
+        return False, traj_plotter.reset_view(), show_directions
+    return False, None, show_directions
 
 
 def main():
@@ -917,7 +932,7 @@ def main():
         f" Trajectory Plot   : {plot_mode.upper()} + PointCloud={'ON' if show_pcl else 'OFF'} "
         "(L-Drag: Rotate | R-Drag: Pan | Scroll: Zoom | 'p': Pts | 'v': 2D/3D)"
     )
-    print(" Press 'q' in the OpenCV window to exit.")
+    print(" Press SPACE to hide/show instructions, or 'q' to exit.")
     print("============================================================")
 
     frames_total = 0
@@ -929,6 +944,8 @@ def main():
     vo_hz = 0.0
     infer_ms = 0.0
     x, y, z = 0.0, 0.0, 0.0
+    last_feed_display = None
+    show_directions = True
 
     try:
         with torch.no_grad():
@@ -938,15 +955,27 @@ def main():
 
                 seq, frame, jpeg_bytes = stream.read_latest(last_seq)
                 if frame is None:
-                    wait_view = render_waiting_screen(feed_w, feed_h, stream.public_url, active_ip)
-                    dashboard = np.hstack((wait_view, traj_img))
+                    # Keep displaying the latest camera frame between 30fps updates (no flashing!)
+                    if last_feed_display is not None and not show_directions:
+                        left_panel = last_feed_display
+                    else:
+                        left_panel = render_waiting_screen(
+                            feed_w, feed_h, stream.public_url, active_ip, show_directions=show_directions
+                        )
+                    dashboard = np.hstack((left_panel, traj_img))
                     cv2.imshow(window_title, dashboard)
-                    should_quit, updated_map = handle_key(cv2.waitKey(20) & 0xFF, traj_plotter)
+                    should_quit, updated_map, show_directions = handle_key(
+                        cv2.waitKey(10) & 0xFF, traj_plotter, show_directions
+                    )
                     if updated_map is not None:
                         traj_img = updated_map
                     if should_quit:
                         break
                     continue
+
+                # Automatically dismiss directions once the first video frame arrives
+                if frames_total == 0:
+                    show_directions = False
 
                 last_seq = seq
                 frames_total += 1
@@ -1027,11 +1056,20 @@ def main():
 
                 if feed_display.shape[1] != feed_w or feed_display.shape[0] != feed_h:
                     feed_display = cv2.resize(feed_display, (feed_w, feed_h))
-                dashboard = np.hstack((feed_display, traj_img))
+                last_feed_display = feed_display
+
+                left_panel = (
+                    render_waiting_screen(feed_w, feed_h, stream.public_url, active_ip, show_directions=True)
+                    if show_directions
+                    else last_feed_display
+                )
+                dashboard = np.hstack((left_panel, traj_img))
 
                 cv2.imshow(window_title, dashboard)
 
-                should_quit, updated_map = handle_key(cv2.waitKey(1) & 0xFF, traj_plotter)
+                should_quit, updated_map, show_directions = handle_key(
+                    cv2.waitKey(1) & 0xFF, traj_plotter, show_directions
+                )
                 if updated_map is not None:
                     traj_img = updated_map
                 if should_quit:
