@@ -26,19 +26,27 @@ export function useBeagleStream(hostAndPort = "127.0.0.1:8765") {
   const [connected, setConnected] = useState(false);
   const [telemetry, setTelemetry] = useState<BeagleTelemetry | null>(null);
   const pointCloudRef = useRef<BeaglePointCloud | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
+  const isSecure =
+    hostAndPort.startsWith("https://") ||
+    hostAndPort.startsWith("wss://") ||
+    hostAndPort.includes("trycloudflare.com") ||
+    (typeof window !== "undefined" && window.location.protocol === "https:" && !hostAndPort.includes(":"));
   const cleanHost = hostAndPort.replace(/^(https?|wss?):\/\//, "").replace(/\/.*$/, "");
-  const videoUrl = `http://${cleanHost}/video.mjpg`;
-  const wsUrl = `ws://${cleanHost}/ws`;
+  const videoUrl = `${isSecure ? "https" : "http"}://${cleanHost}/video.mjpg`;
+  const wsUrl = `${isSecure ? "wss" : "ws"}://${cleanHost}/ws`;
 
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let prevBlobUrl: string | null = null;
     let unmounted = false;
 
     const connect = () => {
       if (unmounted) return;
       ws = new WebSocket(wsUrl);
+      ws.binaryType = "blob";
 
       ws.onopen = () => {
         if (!unmounted) setConnected(true);
@@ -56,6 +64,15 @@ export function useBeagleStream(hostAndPort = "127.0.0.1:8765") {
       };
 
       ws.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+          if (imgRef.current) {
+            const nextUrl = URL.createObjectURL(event.data);
+            imgRef.current.src = nextUrl;
+            if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
+            prevBlobUrl = nextUrl;
+          }
+          return;
+        }
         try {
           const msg = JSON.parse(event.data);
           if (msg.point_cloud) {
@@ -86,6 +103,7 @@ export function useBeagleStream(hostAndPort = "127.0.0.1:8765") {
     return () => {
       unmounted = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
       ws?.close();
     };
   }, [wsUrl]);
@@ -94,6 +112,7 @@ export function useBeagleStream(hostAndPort = "127.0.0.1:8765") {
     connected,
     videoUrl,
     wsUrl,
+    imgRef,
     telemetry,
     pointCloudRef,
   };

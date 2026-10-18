@@ -245,6 +245,9 @@ class _BroadcastRequestHandler(BaseHTTPRequestHandler):
             latest_msg = b.get_latest_telemetry_bytes()
             if latest_msg is not None:
                 self.connection.sendall(_encode_ws_frame(latest_msg, opcode=0x1))
+            latest_jpeg = b.get_latest_jpeg()
+            if latest_jpeg is not None:
+                self.connection.sendall(_encode_ws_frame(latest_jpeg, opcode=0x2))
 
             while client.alive and b.is_running:
                 try:
@@ -320,8 +323,38 @@ class TelemetryBroadcaster:
     def start(self) -> "TelemetryBroadcaster":
         if self.is_running:
             return self
-        self._server = _BroadcastHTTPServer((self.host, self.port), _BroadcastRequestHandler, self)
+        try:
+            self._server = _BroadcastHTTPServer((self.host, self.port), _BroadcastRequestHandler, self)
+        except OSError:
+            print(f"[Broadcast] Port {self.port} is busy — freeing stale broadcaster process...")
+            subprocess.run(["fuser", "-k", f"{self.port}/tcp"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.4)
+            self._server = _BroadcastHTTPServer((self.host, self.port), _BroadcastRequestHandler, self)
         self.is_running = True
+        if self._latest_jpeg is None:
+            placeholder = np.full((360, 640, 3), (18, 22, 30), dtype=np.uint8)
+            cv2.putText(
+                placeholder,
+                "BEAGLE EYES BROADCASTER ONLINE",
+                (75, 165),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.85,
+                (0, 220, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                placeholder,
+                "Waiting for camera / drone stream...",
+                (130, 210),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.60,
+                (160, 175, 195),
+                1,
+                cv2.LINE_AA,
+            )
+            self.publish_frame(frame_bgr=placeholder)
+            self.publish_telemetry(pose=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], frame_id=0, fps=0.0, initialized=False)
         self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._server_thread.start()
         print(f"[Broadcast] Server running on port {self.port}:")
@@ -363,6 +396,11 @@ class TelemetryBroadcaster:
             self._latest_jpeg = jpeg_bytes
             self._jpeg_seq += 1
             self._jpeg_cond.notify_all()
+
+        ws_bin_frame = _encode_ws_frame(jpeg_bytes, opcode=0x2)
+        with self._ws_lock:
+            for client in self._ws_clients:
+                client.enqueue(ws_bin_frame)
 
     def publish_telemetry(
         self,
@@ -550,8 +588,8 @@ class TelemetryBroadcaster:
   </header>
   <main>
     <div class="card">
-      <h3>Live HTTP MJPEG Stream (/video.mjpg)</h3>
-      <img src="/video.mjpg" alt="Waiting for video frames..." />
+      <h3>Live Video Stream</h3>
+      <img id="video-feed" alt="Waiting for video frames..." />
     </div>
     <div class="card">
       <h3>Live WebSocket Telemetry (/ws)</h3>
@@ -561,12 +599,23 @@ class TelemetryBroadcaster:
   <script>
     const statusEl = document.getElementById("status");
     const preEl = document.getElementById("telemetry");
+    const imgEl = document.getElementById("video-feed");
+    let prevBlobUrl = null;
     let lastPclCount = 0;
     function connect() {{
-      const ws = new WebSocket(`ws://${{location.host}}/ws`);
+      const wsProto = location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(`${{wsProto}}://${{location.host}}/ws`);
+      ws.binaryType = "blob";
       ws.onopen = () => {{ statusEl.textContent = "LIVE"; statusEl.style.background = "#10b981"; }};
       ws.onclose = () => {{ statusEl.textContent = "RECONNECTING"; statusEl.style.background = "#f59e0b"; setTimeout(connect, 1000); }};
       ws.onmessage = (ev) => {{
+        if (ev.data instanceof Blob) {{
+          const nextUrl = URL.createObjectURL(ev.data);
+          imgEl.src = nextUrl;
+          if (prevBlobUrl) URL.revokeObjectURL(prevBlobUrl);
+          prevBlobUrl = nextUrl;
+          return;
+        }}
         const data = JSON.parse(ev.data);
         if (data.point_cloud) {{
           lastPclCount = data.point_cloud.count;
