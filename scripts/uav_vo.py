@@ -1241,10 +1241,12 @@ def main():
                         {k: v for k, v in d.items() if not k.startswith("_")} for d in latest_detections_3d
                     ]
                     extra_telemetry = {"detections_3d": clean_dets}
-                    if gps_tf is not None and slam.is_initialized and slam.n > 0:
-                        if gps_last_pos is not None:
-                            gps_path_len_v += float(np.linalg.norm(np.asarray(pose_7d[:3]) - gps_last_pos))
-                        gps_last_pos = np.asarray(pose_7d[:3], dtype=np.float64)
+                    if gps_tf is not None:
+                        # Publish before VO initializes too (drone sits at the origin) so the map starts at the right place.
+                        if slam.is_initialized and slam.n > 0:
+                            if gps_last_pos is not None:
+                                gps_path_len_v += float(np.linalg.norm(np.asarray(pose_7d[:3]) - gps_last_pos))
+                            gps_last_pos = np.asarray(pose_7d[:3], dtype=np.float64)
                         extra_telemetry["geo"] = gps_tf.annotate(
                             pose_7d, latest_detections_3d, pcl_xyz=pcl_xyz, path_len_v=gps_path_len_v
                         )
